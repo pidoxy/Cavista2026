@@ -3,7 +3,7 @@
 import { AuthTokenResponse, AuthUser, Patient, PatientDetail, ActionItem, ScribeResult, HandoverReport, Language } from '../types';
 import { getToken, clearSession } from './session';
 
-const API = process.env.NEXT_PUBLIC_API_BASE_URL || 'http://localhost:8000';
+const API = process.env.NEXT_PUBLIC_API_BASE_URL || 'https://cavista2026-production.up.railway.app';
 
 export class ApiError extends Error {
   status: number;
