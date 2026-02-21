@@ -6,6 +6,7 @@ load_dotenv()
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from sqlalchemy import text
 from aidcare_pipeline import copilot_models
 from aidcare_pipeline.database import SessionLocal
 
@@ -77,4 +78,10 @@ async def root():
 
 @app.get("/health")
 async def health_check():
-    return {"status": "healthy", "version": "2.0.0"}
+    try:
+        db = SessionLocal()
+        db.execute(text("SELECT 1"))
+        db.close()
+        return {"status": "healthy", "version": "2.0.0", "database": "connected"}
+    except Exception as e:
+        return {"status": "unhealthy", "version": "2.0.0", "database": f"error: {e}"}

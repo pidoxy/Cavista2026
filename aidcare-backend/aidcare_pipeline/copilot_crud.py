@@ -12,18 +12,22 @@ from . import copilot_models as models
 def create_doctor(
     db: Session,
     doctor_uuid: str,
+    email: str,
+    password_hash: str,
     full_name: str,
     specialty: str,
-    ward: str,
-    hospital: str = "",
+    hospital_id: int | None = None,
+    ward_id: int | None = None,
     role: str = "doctor",
 ) -> models.Doctor:
     db_doctor = models.Doctor(
         doctor_uuid=doctor_uuid,
+        email=email,
+        password_hash=password_hash,
         full_name=full_name,
         specialty=specialty,
-        ward=ward,
-        hospital=hospital,
+        hospital_id=hospital_id,
+        ward_id=ward_id,
         role=role,
         is_active=True,
     )
@@ -53,7 +57,7 @@ def start_shift(
     db: Session,
     shift_uuid: str,
     doctor_id_int: int,
-    ward: str,
+    ward_id: int | None = None,
 ) -> models.Shift:
     # Close any previously active shift for this doctor (safety guard)
     active = (
@@ -72,7 +76,7 @@ def start_shift(
     db_shift = models.Shift(
         shift_uuid=shift_uuid,
         doctor_id=doctor_id_int,
-        ward=ward,
+        ward_id=ward_id,
         is_active=True,
         handover_generated=False,
     )

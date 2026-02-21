@@ -38,7 +38,14 @@ if SQLALCHEMY_DATABASE_URL.startswith("sqlite"):
         connect_args={"check_same_thread": False},
     )
 else:
-    engine = create_engine(SQLALCHEMY_DATABASE_URL, echo=False)
+    engine = create_engine(
+        SQLALCHEMY_DATABASE_URL,
+        echo=False,
+        pool_pre_ping=True,       # Test connections before use (fixes Railway idle disconnects)
+        pool_recycle=300,          # Recycle connections every 5 minutes
+        pool_size=5,
+        max_overflow=10,
+    )
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
 Base = declarative_base() # This Base will be imported by your models file
