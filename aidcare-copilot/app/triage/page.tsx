@@ -3,7 +3,7 @@
 import { useEffect, useRef, useState } from 'react';
 import AppShell from '../../components/AppShell';
 import Icon from '../../components/Icon';
-import { triageContinue, triageProcessText, triageTTS, triageSave, getPatients, getError } from '../../lib/api';
+import { triageContinue, triageProcessText, triageProcessAudio, triageTTS, triageSave, getPatients, getError } from '../../lib/api';
 import { Patient } from '../../types';
 
 type Phase = 'language' | 'conversation' | 'results';
@@ -131,17 +131,7 @@ export default function TriagePage() {
       mrRef.current!.stream.getTracks().forEach(t => t.stop());
     });
     try {
-      const API = process.env.NEXT_PUBLIC_API_BASE_URL || 'http://localhost:8000';
-      const token = typeof window !== 'undefined' ? localStorage.getItem('aidcare_token') : null;
-      const headers: Record<string, string> = {};
-      if (token) headers.Authorization = `Bearer ${token}`;
-      const fd = new FormData();
-      fd.append('audio_file', blob, 'triage.webm');
-      fd.append('language', lang);
-      fd.append('staff_notes', staffNotes);
-      const r = await fetch(`${API}/triage/process_audio`, { method: 'POST', headers, body: fd });
-      if (!r.ok) throw new Error('Audio processing failed');
-      const res = await r.json();
+      const res = await triageProcessAudio(blob, lang, staffNotes);
       if (res.transcript) setMsgs(prev => [...prev, { role: 'patient', content: res.transcript }]);
       setTriageResult(res);
       setPhase('results');

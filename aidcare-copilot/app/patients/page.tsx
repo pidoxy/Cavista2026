@@ -109,14 +109,34 @@ export default function PatientsPage() {
 
       {/* ── Body ── */}
       <div className="flex flex-1 overflow-hidden">
-        {/* ── LEFT: Clinical Timeline ── */}
+        {/* ── LEFT: Patient list + Clinical Timeline ── */}
         <aside className="w-80 border-r border-slate-200 bg-white overflow-y-auto hidden md:flex flex-col flex-shrink-0">
-          <div className="p-6 border-b border-slate-100 sticky top-0 bg-white z-10">
-            <h3 className="text-slate-900 text-lg font-bold">Clinical Timeline</h3>
-            <div className="flex items-center justify-between mt-2">
-              <span className="text-xs font-medium text-slate-500 uppercase tracking-wider">Sort by Date</span>
+          {/* Patient list */}
+          <div className="p-4 border-b border-slate-100 sticky top-0 bg-white z-10">
+            <h3 className="text-slate-900 text-sm font-bold mb-2">Patients</h3>
+            <div className="space-y-1 max-h-32 overflow-y-auto">
+              {[...groups.critical, ...groups.stable, ...groups.discharged].map(p => (
+                <button key={p.patient_id} onClick={() => selectPatient(p.patient_id)}
+                  className={`w-full text-left rounded-lg px-3 py-2 text-sm transition ${
+                    detail?.patient_id === p.patient_id
+                      ? 'bg-blue-50 text-blue-700 border border-blue-200 font-medium'
+                      : 'hover:bg-slate-50 text-slate-700 border border-transparent'
+                  }`}>
+                  <p className="truncate font-medium">{p.full_name}</p>
+                  <p className="text-[10px] text-slate-500 truncate">{p.bed_number ? `Bed ${p.bed_number}` : ''} {p.primary_diagnosis || p.status}</p>
+                </button>
+              ))}
+            </div>
+            {!loading && [...groups.critical, ...groups.stable, ...groups.discharged].length === 0 && (
+              <p className="text-xs text-slate-400 py-2">No patients found. Run seed_demo.py to add demo data.</p>
+            )}
+          </div>
+          <div className="p-4 border-b border-slate-100">
+            <h3 className="text-slate-900 text-sm font-bold">Clinical Timeline</h3>
+            <div className="flex items-center justify-between mt-1">
+              <span className="text-[10px] font-medium text-slate-500 uppercase tracking-wider">Sort by Date</span>
               <button className="text-blue-600 hover:text-blue-700 transition-colors">
-                <Icon name="filter_list" className="text-xl" />
+                <Icon name="filter_list" className="text-lg" />
               </button>
             </div>
           </div>

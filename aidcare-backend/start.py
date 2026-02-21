@@ -15,8 +15,8 @@ if __name__ == "__main__":
     # Create DB tables if DATABASE_URL is set (safe to run on every startup — create_all is idempotent)
     if os.environ.get("DATABASE_URL"):
         try:
-            from aidcare_pipeline.db_models import create_db_and_tables
-            create_db_and_tables()
+            from aidcare_pipeline import copilot_models
+            copilot_models.create_copilot_tables()
         except Exception as e:
             print(f"WARNING: Could not create database tables: {e}")
 

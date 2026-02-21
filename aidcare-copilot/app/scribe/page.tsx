@@ -3,9 +3,9 @@
 import { useEffect, useRef, useState } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import Icon from '../../components/Icon';
-import { transcribeAndScribe, getPatientDetail, startShift, getActiveShift, getError } from '../../lib/api';
+import { transcribeAndScribe, getPatientDetail, getPatients, startShift, getActiveShift, getError } from '../../lib/api';
 import { getSessionUser, getSessionShift, setSessionShift } from '../../lib/session';
-import { ScribeResult, PatientDetail, SOAPNote, Language } from '../../types';
+import { ScribeResult, PatientDetail, SOAPNote, Language, Patient } from '../../types';
 
 interface TranscriptMsg {
   role: 'DR' | 'PT';
@@ -23,6 +23,9 @@ export default function ScribePage() {
   const patientId = searchParams.get('patient') || '';
 
   const [patient, setPatient] = useState<PatientDetail | null>(null);
+  const [patients, setPatients] = useState<Patient[]>([]);
+  const [showPatientPicker, setShowPatientPicker] = useState(false);
+  const [patientsLoading, setPatientsLoading] = useState(false);
   const [transcript, setTranscript] = useState<TranscriptMsg[]>([]);
   const [soap, setSoap] = useState<SOAPNote>({ subjective: '', objective: '', assessment: '', plan: '' });
   const [recState, setRecState] = useState<RecState>('idle');
@@ -42,9 +45,25 @@ export default function ScribePage() {
     if (!user) { router.push('/login'); return; }
     ensureShift();
     if (patientId) loadPatient(patientId);
+    else setPatient(null);
   }, [patientId]);
 
   useEffect(() => { bottomRef.current?.scrollIntoView({ behavior: 'smooth' }); }, [transcript]);
+
+  async function loadPatientsForPicker() {
+    setShowPatientPicker(true);
+    if (patients.length > 0) return;
+    setPatientsLoading(true);
+    try {
+      const d = await getPatients(user?.ward_id || undefined);
+      setPatients([...d.patients.critical, ...d.patients.stable, ...d.patients.discharged]);
+    } catch {} finally { setPatientsLoading(false); }
+  }
+
+  function selectPatientForScribe(p: Patient) {
+    setShowPatientPicker(false);
+    router.replace(`/scribe?patient=${p.patient_id}`);
+  }
 
   async function ensureShift() {
     if (getSessionShift()) return;
@@ -154,9 +173,12 @@ export default function ScribePage() {
                 <div className="size-14 rounded-full bg-slate-100 flex items-center justify-center text-base font-bold text-slate-600 ring-2 ring-slate-50">
                   {patient.full_name.split(' ').map(n => n[0]).join('').slice(0, 2)}
                 </div>
-                <div>
+                <div className="flex-1 min-w-0">
                   <p className="text-sm font-bold text-slate-900">{patient.full_name}</p>
                   <p className="text-xs text-slate-500">{patient.gender}, {patient.age} &bull; ID: #{patient.patient_id.slice(-6)}</p>
+                  <button onClick={loadPatientsForPicker} className="text-[10px] text-blue-600 hover:underline mt-1">
+                    Change patient
+                  </button>
                 </div>
               </div>
 
@@ -222,7 +244,14 @@ export default function ScribePage() {
             <div className="text-center py-16">
               <Icon name="person_search" className="text-4xl text-slate-300 mb-3" />
               <p className="text-sm text-slate-400 mb-2">No patient selected</p>
-              <button onClick={() => router.push('/patients')} className="text-xs text-blue-600 hover:underline">Select a patient</button>
+              <button onClick={loadPatientsForPicker} disabled={patientsLoading}
+                className="text-xs text-blue-600 hover:underline font-medium disabled:opacity-50">
+                {patientsLoading ? 'Loading...' : 'Select a patient'}
+              </button>
+              <p className="text-[10px] text-slate-400 mt-2">or</p>
+              <button onClick={() => router.push('/patients')} className="text-xs text-slate-500 hover:text-slate-700 mt-1">
+                View all patients
+              </button>
             </div>
           )}
         </aside>
@@ -359,6 +388,33 @@ export default function ScribePage() {
           </div>
         </aside>
       </div>
+
+      {/* Patient picker modal */}
+      {showPatientPicker && (
+        <div className="fixed inset-0 bg-black/30 flex items-center justify-center z-50" onClick={() => setShowPatientPicker(false)}>
+          <div className="bg-white rounded-xl shadow-xl p-6 w-96 max-h-[70vh] overflow-hidden border border-slate-200" onClick={e => e.stopPropagation()}>
+            <h3 className="text-base font-semibold text-slate-900 mb-4">Select Patient</h3>
+            {patientsLoading ? (
+              <p className="text-sm text-slate-500 py-4">Loading patients...</p>
+            ) : patients.length > 0 ? (
+              <div className="overflow-y-auto max-h-64 space-y-2">
+                {patients.map(p => (
+                  <button key={p.patient_id} onClick={() => selectPatientForScribe(p)}
+                    className="w-full text-left rounded-lg border border-slate-200 p-3 hover:bg-slate-50 hover:border-slate-300 transition">
+                    <p className="text-sm font-medium text-slate-900">{p.full_name}</p>
+                    <p className="text-xs text-slate-500">{p.bed_number ? `Bed ${p.bed_number} \u2022 ` : ''}{p.primary_diagnosis || p.status}</p>
+                  </button>
+                ))}
+              </div>
+            ) : (
+              <p className="text-sm text-slate-400 py-4">No patients in your ward. Add patients from the Patients page.</p>
+            )}
+            <button onClick={() => setShowPatientPicker(false)} className="mt-4 w-full h-9 rounded-lg border border-slate-200 bg-white text-slate-700 text-sm font-medium hover:bg-slate-50 transition">
+              Cancel
+            </button>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
