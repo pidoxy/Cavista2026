@@ -11,10 +11,52 @@ import {
   AdminDashboard,
   Language,
 } from '../types';
+import {
+  AssistLanguageCode,
+  AssistTriageResult,
+} from '../types/triage';
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL || 'http://localhost:8000';
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
+
+type ApiErrorPayload = {
+  detail?: string;
+  message?: string;
+};
+
+export class ApiError extends Error {
+  status: number;
+  detail: string;
+
+  constructor(status: number, detail: string) {
+    super(`API ${status}: ${detail}`);
+    this.name = 'ApiError';
+    this.status = status;
+    this.detail = detail;
+  }
+}
+
+function extractErrorDetail(raw: string): string {
+  try {
+    const parsed = JSON.parse(raw) as ApiErrorPayload;
+    return parsed.detail || parsed.message || raw;
+  } catch {
+    return raw;
+  }
+}
+
+export function getErrorMessage(error: unknown, fallback = 'Something went wrong.'): string {
+  if (error instanceof ApiError) {
+    return error.detail || fallback;
+  }
+  if (error instanceof Error) {
+    const match = error.message.match(/^API\s+\d+:\s*(.*)$/);
+    if (match?.[1]) return extractErrorDetail(match[1]);
+    return error.message || fallback;
+  }
+  return fallback;
+}
 
 async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(`${API_BASE}${path}`, {
@@ -22,8 +64,8 @@ async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
     ...init,
   });
   if (!res.ok) {
-    const err = await res.text().catch(() => res.statusText);
-    throw new Error(`API ${res.status}: ${err}`);
+    const errText = await res.text().catch(() => res.statusText);
+    throw new ApiError(res.status, extractErrorDetail(errText || res.statusText));
   }
   return res.json();
 }
@@ -73,8 +115,8 @@ export async function transcribeAndScribe(
     body: formData,
   });
   if (!res.ok) {
-    const err = await res.text().catch(() => res.statusText);
-    throw new Error(`Scribe API ${res.status}: ${err}`);
+    const errText = await res.text().catch(() => res.statusText);
+    throw new ApiError(res.status, extractErrorDetail(errText || res.statusText));
   }
   return res.json();
 }
@@ -146,4 +188,69 @@ export async function getAdminDashboard(): Promise<AdminDashboard> {
 
 export async function getDoctorDetail(doctorUuid: string) {
   return apiFetch(`/admin/doctor/${doctorUuid}/detail`);
+}
+
+// ─── Copilot Assist ──────────────────────────────────────────────────────────
+
+export async function copilotContinueConversation(params: {
+  conversationHistory: string;
+  latestMessage: string;
+  language: AssistLanguageCode;
+}): Promise<{
+  response: string;
+  language: string;
+  conversation_complete: boolean;
+  should_auto_complete: boolean;
+}> {
+  return apiFetch('/copilot/triage/conversation/continue', {
+    method: 'POST',
+    body: JSON.stringify({
+      conversation_history: params.conversationHistory,
+      latest_message: params.latestMessage,
+      language: params.language,
+    }),
+  });
+}
+
+export async function copilotProcessText(
+  transcriptText: string,
+  language: AssistLanguageCode
+): Promise<AssistTriageResult> {
+  return apiFetch('/copilot/triage/process_text', {
+    method: 'POST',
+    body: JSON.stringify({
+      transcript_text: transcriptText,
+      language,
+    }),
+  });
+}
+
+export async function copilotProcessAudio(
+  audioBlob: Blob,
+  language: AssistLanguageCode
+): Promise<AssistTriageResult> {
+  const formData = new FormData();
+  formData.append('audio_file', audioBlob, 'assist-recording.webm');
+  formData.append('language', language);
+
+  const res = await fetch(`${API_BASE}/copilot/triage/process_audio`, {
+    method: 'POST',
+    body: formData,
+  });
+  if (!res.ok) {
+    const errText = await res.text().catch(() => res.statusText);
+    throw new ApiError(res.status, extractErrorDetail(errText || res.statusText));
+  }
+  return res.json();
+}
+
+export async function getCopilotGuidelineSources(): Promise<{
+  sources: {
+    chw: number;
+    clinical: number;
+    parsed_guidelines: number;
+  };
+  parsed_breakdown: Record<string, number>;
+}> {
+  return apiFetch('/copilot/guidelines/sources');
 }

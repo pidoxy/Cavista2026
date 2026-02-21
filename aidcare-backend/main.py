@@ -29,6 +29,11 @@ from aidcare_pipeline.recommendation import generate_triage_recommendation
 from aidcare_pipeline.rate_limiter import get_rate_limit_stats, clear_cache, RateLimitExceeded
 from aidcare_pipeline.multilingual import generate_multilingual_response
 from aidcare_pipeline.tts_service import generate_speech, get_voice_id
+from aidcare_pipeline.parsed_guidelines import (
+    load_parsed_guidelines,
+    find_parsed_evidence,
+    get_parsed_source_counts,
+)
 from aidcare_pipeline import copilot_crud, copilot_models
 # For Clinical Mode - Step 2 (You'll create this function/module later)
 # from aidcare_pipeline.clinical_support_generation import generate_clinical_support_details_with_gemini
@@ -99,6 +104,17 @@ class HandoverRequest(BaseModel):
     doctor_uuid: str
     shift_uuid: str
     handover_notes: str = ""
+
+
+class CopilotTriageConversationInput(BaseModel):
+    conversation_history: str
+    latest_message: str
+    language: str = "en"
+
+
+class CopilotTriageTextInput(BaseModel):
+    transcript_text: str
+    language: str = "en"
         
 # --- Environment Variable Checks & Setup ---
 if not os.environ.get("GOOGLE_API_KEY"):
@@ -187,6 +203,42 @@ def _ensure_seed_doctors(db: Session):
     for doctor in DEFAULT_COPILOT_DOCTORS:
         copilot_crud.create_doctor(db=db, **doctor)
 
+
+def _normalize_symptoms(symptoms):
+    if isinstance(symptoms, list):
+        return [str(s).strip() for s in symptoms if str(s).strip()]
+    if isinstance(symptoms, dict):
+        result = symptoms.get("symptoms") or symptoms.get("key_symptoms")
+        if isinstance(result, list):
+            return [str(s).strip() for s in result if str(s).strip()]
+    if isinstance(symptoms, str) and symptoms.strip():
+        return [symptoms.strip()]
+    return []
+
+
+def _derive_risk_level(urgency_level: str) -> str:
+    text = (urgency_level or "").lower()
+    if any(key in text for key in ["emergency", "immediate", "critical", "urgent referral"]):
+        return "high"
+    if any(key in text for key in ["urgent", "refer", "hospital", "observe closely"]):
+        return "moderate"
+    return "low"
+
+
+def _format_local_evidence(docs: list[dict], top_k: int = 2) -> list[dict]:
+    evidence = []
+    for doc in docs[:top_k]:
+        evidence.append(
+            {
+                "source_type": "local_guideline",
+                "guideline_section": doc.get("subsection_code") or doc.get("section_id") or "Unknown",
+                "source_excerpt": (doc.get("case") or doc.get("source_document_name") or "Guideline reference"),
+                "source_document": doc.get("source_document_name") or "Local Guideline Index",
+                "score": doc.get("retrieval_score (distance)"),
+            }
+        )
+    return evidence
+
 # --- Lifespan Events for Model Loading ---
 @app.on_event("startup")
 async def startup_event():
@@ -196,6 +248,8 @@ async def startup_event():
         copilot_models.create_copilot_tables()
         with SessionLocal() as db:
             _ensure_seed_doctors(db)
+        parsed_count = len(load_parsed_guidelines(force_reload=True))
+        print(f"Parsed guideline entries loaded: {parsed_count}")
     except Exception as e:
         print(f"WARNING: Copilot tables/seed setup failed: {e}")
     
@@ -1484,6 +1538,151 @@ async def naija_process_audio(
                 os.remove(file_path)
             except Exception:
                 pass
+
+
+# ===========================================================================
+# COPILOT NAMESPACE ENDPOINTS
+# ===========================================================================
+
+@app.post("/copilot/triage/conversation/continue")
+async def copilot_continue_conversation(conversation_input: CopilotTriageConversationInput):
+    if not conversation_input.latest_message or not conversation_input.latest_message.strip():
+        raise HTTPException(status_code=400, detail="Latest message cannot be empty.")
+    try:
+        return generate_multilingual_response(
+            conversation_history=conversation_input.conversation_history,
+            latest_message=conversation_input.latest_message,
+            language=conversation_input.language,
+        )
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Copilot conversation error: {str(e)}")
+
+
+@app.post("/copilot/triage/process_text")
+async def copilot_process_text(
+    transcript_input: CopilotTriageTextInput,
+    retriever: GuidelineRetriever = Depends(get_chw_retriever_dependency),
+):
+    transcript = transcript_input.transcript_text
+    language = transcript_input.language
+    if not transcript or not transcript.strip():
+        raise HTTPException(status_code=400, detail="Transcript text cannot be empty.")
+
+    try:
+        symptoms = extract_symptoms_with_gemini(transcript)
+        if isinstance(symptoms, dict) and "error" in symptoms:
+            raise HTTPException(status_code=500, detail=f"Symptom extraction failed: {symptoms.get('error')}")
+
+        symptom_terms = _normalize_symptoms(symptoms)
+        retrieval_query = symptom_terms if symptom_terms else [transcript[:200]]
+        retrieved_docs = retriever.retrieve_relevant_guidelines(retrieval_query, top_k=3)
+
+        recommendation = generate_triage_recommendation(
+            symptom_terms if symptom_terms else symptoms,
+            retrieved_docs,
+            language=language,
+        )
+        if not recommendation or (isinstance(recommendation, dict) and "error" in recommendation):
+            detail = recommendation.get("error") if isinstance(recommendation, dict) else "Unknown error"
+            raise HTTPException(status_code=500, detail=f"Recommendation failed: {detail}")
+
+        parsed_hits = find_parsed_evidence(" ".join(retrieval_query), top_k=2)
+        parsed_evidence = [
+            {
+                "source_type": "parsed_guideline",
+                "guideline_section": hit.get("section_id", "Unknown"),
+                "source_excerpt": hit.get("source_excerpt", ""),
+                "source_document": hit.get("source", "parsed"),
+                "cadre": hit.get("cadre", "Unknown"),
+                "condition": hit.get("condition", "Unknown"),
+                "referral_required": hit.get("referral_required", False),
+            }
+            for hit in parsed_hits
+        ]
+        local_evidence = _format_local_evidence(retrieved_docs, top_k=2)
+        evidence = local_evidence + parsed_evidence
+
+        urgency = recommendation.get("urgency_level", "")
+        risk_level = _derive_risk_level(urgency)
+        return {
+            "mode": f"copilot_triage_{language}",
+            "language": language,
+            "input_transcript": transcript,
+            "extracted_symptoms": symptom_terms,
+            "triage_recommendation": recommendation,
+            "evidence": evidence,
+            "risk_level": risk_level,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Copilot text triage error: {str(e)}")
+
+
+@app.post("/copilot/triage/process_audio")
+async def copilot_process_audio(
+    audio_file: UploadFile = File(...),
+    language: str = Form("en"),
+    retriever: GuidelineRetriever = Depends(get_chw_retriever_dependency),
+):
+    unique_suffix = f"{int(time.time() * 1000)}_copilot_{audio_file.filename}"
+    file_path = os.path.join(TEMP_AUDIO_DIR, unique_suffix)
+    try:
+        with open(file_path, "wb") as buffer:
+            shutil.copyfileobj(audio_file.file, buffer)
+
+        transcript = transcribe_audio_local(file_path, language=language if language != "pcm" else None)
+        if not transcript:
+            raise HTTPException(status_code=500, detail="Transcription failed or returned empty.")
+
+        result = await copilot_process_text(
+            transcript_input=CopilotTriageTextInput(transcript_text=transcript, language=language),
+            retriever=retriever,
+        )
+        result["transcript"] = transcript
+        return result
+    except HTTPException:
+        raise
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Copilot audio triage error: {str(e)}")
+    finally:
+        if os.path.exists(file_path):
+            try:
+                os.remove(file_path)
+            except Exception:
+                pass
+
+
+@app.get("/copilot/guidelines/sources")
+async def copilot_guideline_sources():
+    parsed_records = load_parsed_guidelines()
+    parsed_counts = get_parsed_source_counts()
+    chw_count = 0
+    clinical_count = 0
+    if "chw_retriever" in app_state and app_state["chw_retriever"] and app_state["chw_retriever"].index is not None:
+        chw_count = int(app_state["chw_retriever"].index.ntotal)
+    if "clinical_retriever" in app_state and app_state["clinical_retriever"] and app_state["clinical_retriever"].index is not None:
+        clinical_count = int(app_state["clinical_retriever"].index.ntotal)
+
+    return {
+        "sources": {
+            "chw": chw_count,
+            "clinical": clinical_count,
+            "parsed_guidelines": len(parsed_records),
+        },
+        "parsed_breakdown": parsed_counts,
+    }
+
+
+@app.post("/copilot/tts/generate")
+async def copilot_tts_generate(tts_request: TTSRequest):
+    return await tts_generate(tts_request)
 
 
 @app.post("/tts/generate/")

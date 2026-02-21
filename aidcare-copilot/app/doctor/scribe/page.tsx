@@ -1,6 +1,7 @@
 'use client';
 
 import { useEffect } from 'react';
+import { useState } from 'react';
 import { useRouter } from 'next/navigation';
 import {
   clearSessionDoctor,
@@ -8,11 +9,14 @@ import {
   getSessionShift,
   getShiftDuration,
 } from '../../../lib/session';
+import { endShift, getErrorMessage } from '../../../lib/api';
 
 export default function DoctorScribePage() {
   const router = useRouter();
   const doctor = getSessionDoctor();
   const shift = getSessionShift();
+  const [ending, setEnding] = useState(false);
+  const [error, setError] = useState('');
 
   useEffect(() => {
     if (!doctor || !shift) {
@@ -21,6 +25,20 @@ export default function DoctorScribePage() {
   }, [doctor, shift, router]);
 
   if (!doctor || !shift) return null;
+
+  async function handleEndShift() {
+    if (!doctor || !shift) return;
+    setEnding(true);
+    setError('');
+    try {
+      await endShift(doctor.doctor_id, shift.shift_id);
+      clearSessionDoctor();
+      router.replace('/doctor');
+    } catch (e: unknown) {
+      setError(getErrorMessage(e, 'Failed to end shift. Please try again.'));
+      setEnding(false);
+    }
+  }
 
   return (
     <div className="min-h-screen bg-[#F8FAFC] px-4 py-10">
@@ -46,6 +64,7 @@ export default function DoctorScribePage() {
           <p className="mt-6 rounded-lg bg-blue-50 px-3 py-2 text-xs text-blue-800">
             Scribe workspace is scaffolded and ready for the next feature pass.
           </p>
+          {error && <p className="mt-4 text-xs text-red-600">{error}</p>}
 
           <div className="mt-6 flex gap-3">
             <button
@@ -55,13 +74,17 @@ export default function DoctorScribePage() {
               Back to Login
             </button>
             <button
-              onClick={() => {
-                clearSessionDoctor();
-                router.replace('/doctor');
-              }}
+              onClick={() => router.push('/doctor/assist')}
+              className="rounded-lg border border-[#0066CC] px-4 py-2 text-sm font-medium text-[#0066CC] hover:bg-blue-50"
+            >
+              Open Assist Mode
+            </button>
+            <button
+              onClick={handleEndShift}
+              disabled={ending}
               className="rounded-lg bg-[#0066CC] px-4 py-2 text-sm font-medium text-white hover:bg-[#0052a3]"
             >
-              End Local Session
+              {ending ? 'Ending Shift...' : 'End Shift'}
             </button>
           </div>
         </div>

@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
-import { getAdminDashboard } from '../../lib/api';
+import { getAdminDashboard, getErrorMessage } from '../../lib/api';
 import { AdminDashboard } from '../../types';
 
 export default function AdminPage() {
@@ -11,13 +11,21 @@ export default function AdminPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
 
+  async function loadDashboard() {
+    setLoading(true);
+    setError('');
+    try {
+      const dashboard = await getAdminDashboard();
+      setData(dashboard);
+    } catch (e: unknown) {
+      setError(getErrorMessage(e, 'Could not load dashboard.'));
+    } finally {
+      setLoading(false);
+    }
+  }
+
   useEffect(() => {
-    getAdminDashboard()
-      .then(setData)
-      .catch((e: unknown) => {
-        setError(e instanceof Error ? e.message : 'Could not load dashboard');
-      })
-      .finally(() => setLoading(false));
+    loadDashboard();
   }, []);
 
   return (
@@ -28,18 +36,34 @@ export default function AdminPage() {
             <h1 className="text-2xl font-semibold text-gray-900">Admin Dashboard</h1>
             <p className="mt-1 text-sm text-gray-600">Team load and staffing snapshot.</p>
           </div>
-          <button
-            onClick={() => router.push('/doctor')}
-            className="rounded-lg border border-gray-300 px-4 py-2 text-sm text-gray-700 hover:bg-gray-50"
-          >
-            Back to Doctor Login
-          </button>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={loadDashboard}
+              className="rounded-lg border border-gray-300 px-4 py-2 text-sm text-gray-700 hover:bg-gray-50"
+            >
+              Refresh
+            </button>
+            <button
+              onClick={() => router.push('/doctor')}
+              className="rounded-lg border border-gray-300 px-4 py-2 text-sm text-gray-700 hover:bg-gray-50"
+            >
+              Back to Doctor Login
+            </button>
+          </div>
         </div>
 
         {loading ? (
           <div className="rounded-2xl border border-gray-200 bg-white p-6 text-sm text-gray-600">Loading dashboard...</div>
         ) : error ? (
-          <div className="rounded-2xl border border-red-200 bg-red-50 p-6 text-sm text-red-700">{error}</div>
+          <div className="rounded-2xl border border-red-200 bg-red-50 p-6 text-sm text-red-700">
+            <p>{error}</p>
+            <button
+              onClick={loadDashboard}
+              className="mt-3 rounded-lg border border-red-300 px-3 py-1.5 text-xs text-red-700 hover:bg-red-100"
+            >
+              Retry
+            </button>
+          </div>
         ) : data ? (
           <>
             <div className="mb-6 grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
@@ -54,6 +78,9 @@ export default function AdminPage() {
             <div className="rounded-2xl border border-gray-200 bg-white p-4 shadow-sm">
               <h2 className="mb-3 text-sm font-semibold text-gray-900">Doctor Status</h2>
               <div className="space-y-2">
+                {data.doctors.length === 0 && (
+                  <p className="text-sm text-gray-600">No doctors found.</p>
+                )}
                 {data.doctors.map((doctor) => (
                   <div key={doctor.doctor_id} className="rounded-xl border border-gray-100 px-3 py-3">
                     <div className="flex items-center justify-between gap-3">

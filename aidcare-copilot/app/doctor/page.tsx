@@ -1,7 +1,7 @@
 'use client';
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
-import { getDoctors } from '../../lib/api';
+import { getDoctors, getErrorMessage } from '../../lib/api';
 import { setSessionDoctor, setSessionShift, getSessionDoctor } from '../../lib/session';
 import { startShift } from '../../lib/api';
 import { Doctor } from '../../types';
@@ -15,17 +15,30 @@ export default function DoctorLoginPage() {
   const [starting, setStarting] = useState(false);
   const [error, setError] = useState('');
 
+  const loadDoctors = useCallback(async () => {
+    setLoading(true);
+    setError('');
+    try {
+      const result = await getDoctors();
+      setDoctors(result.doctors);
+      if (result.doctors.filter((d) => d.role === 'doctor').length === 0) {
+        setError('No doctor profiles are available yet.');
+      }
+    } catch (e: unknown) {
+      setError(getErrorMessage(e, 'Could not load doctors.'));
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
   useEffect(() => {
     const existing = getSessionDoctor();
     if (existing) {
       router.replace('/doctor/scribe');
       return;
     }
-    getDoctors()
-      .then(({ doctors }) => setDoctors(doctors))
-      .catch(() => setError('Could not load doctors. Is the backend running?'))
-      .finally(() => setLoading(false));
-  }, [router]);
+    loadDoctors();
+  }, [router, loadDoctors]);
 
   async function handleStart() {
     if (!selected) return;
@@ -37,7 +50,7 @@ export default function DoctorLoginPage() {
       setSessionShift({ shift_id: shift.shift_id, started_at: shift.started_at, ward: ward || selected.ward });
       router.push('/doctor/scribe');
     } catch (e: unknown) {
-      setError(e instanceof Error ? e.message : 'Failed to start shift');
+      setError(getErrorMessage(e, 'Failed to start shift.'));
       setStarting(false);
     }
   }
@@ -98,6 +111,14 @@ export default function DoctorLoginPage() {
               )}
 
               {error && <p className="text-red-600 text-xs mb-3">{error}</p>}
+              {!loading && doctors.filter(d => d.role === 'doctor').length === 0 && (
+                <button
+                  onClick={loadDoctors}
+                  className="mb-3 rounded-lg border border-gray-300 px-3 py-1.5 text-xs text-gray-700 hover:bg-gray-50"
+                >
+                  Retry
+                </button>
+              )}
 
               <button
                 onClick={handleStart}
