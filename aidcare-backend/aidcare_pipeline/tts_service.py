@@ -1,25 +1,28 @@
 # aidcare_pipeline/tts_service.py
-# ElevenLabs TTS service for Nigerian language audio generation
-# Uses eleven_multilingual_v2 model which supports Hausa, Yoruba, Igbo
+# TTS service for Nigerian language audio generation
+# - Yoruba: YarnGPT (yarngpt.ai) — native Nigerian voices
+# - All other languages: ElevenLabs eleven_multilingual_v2
 
 import httpx
 import os
 from typing import Optional
 
+# ── ElevenLabs ────────────────────────────────────────────────────────────────
 ELEVENLABS_API_URL = "https://api.elevenlabs.io/v1/text-to-speech"
 ELEVENLABS_MODEL = "eleven_multilingual_v2"
 
-# Voice IDs — fill these after auditing the ElevenLabs voice library
-# Navigate to elevenlabs.io/voice-library, filter by language, test & pick best voice
 LANGUAGE_VOICE_IDS: dict[str, str] = {
     'en':  os.getenv("ELEVENLABS_VOICE_EN",  "EXAVITQu4vr4xnSDxMaL"), # Bella — English
     'ha':  os.getenv("ELEVENLABS_VOICE_HA",  "TBvIh5TNCMX6pQNIcWV8"), # Hausa voice
-    'yo':  os.getenv("ELEVENLABS_VOICE_YO",  "9Dbo4hEvXQ5l7MXGZFQA"), # Olufunmilola — Yoruba female
     'ig':  os.getenv("ELEVENLABS_VOICE_IG",  "kMy0Co9mV2JmuSM9VcRQ"), # Igbo voice
     'pcm': os.getenv("ELEVENLABS_VOICE_PCM", "8P18CIVcRlwP98FOjZDm"), # Naija Pidgin voice
 }
 
-MAX_CHARS = 2500  # Conservative limit per ElevenLabs tier
+# ── YarnGPT (Yoruba) ──────────────────────────────────────────────────────────
+YARNGPT_API_URL = "https://yarngpt.ai/api/v1/tts"
+YARNGPT_VOICE_YO = os.getenv("YARNGPT_VOICE_YO", "Wura")  # Wura — Yoruba, young & sweet
+
+MAX_CHARS = 2000  # YarnGPT limit; ElevenLabs is more lenient but we use the lower cap
 
 
 async def generate_speech(
@@ -28,27 +31,69 @@ async def generate_speech(
     voice_id: Optional[str] = None
 ) -> bytes:
     """
-    Call ElevenLabs TTS API and return raw audio bytes (audio/mpeg).
-
-    Args:
-        text: The text to speak (will be truncated intelligently if too long)
-        language: Language code — used to select the voice ID if voice_id not provided
-        voice_id: Optional override for the voice ID
+    Generate speech audio bytes for the given text and language.
+    Yoruba ('yo') is routed to YarnGPT; all other languages use ElevenLabs.
 
     Returns:
-        Raw audio bytes (audio/mpeg format)
-
-    Raises:
-        ValueError: If ELEVENLABS_API_KEY is not set
-        httpx.HTTPStatusError: If the ElevenLabs API returns an error
+        Raw audio bytes (audio/mpeg)
     """
+    if language == 'yo':
+        return await _yarngpt_generate(text, voice_id or YARNGPT_VOICE_YO)
+    return await _elevenlabs_generate(text, language, voice_id)
+
+
+async def _yarngpt_generate(text: str, voice: str) -> bytes:
+    """Call YarnGPT TTS and return raw audio bytes."""
+    api_key = os.environ.get("YARNGPT_API_KEY")
+    if not api_key:
+        raise ValueError("YARNGPT_API_KEY environment variable is not set")
+
+    truncated_text = _truncate_at_sentence(text, MAX_CHARS)
+
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+    }
+    payload = {
+        "text": truncated_text,
+        "voice": voice,
+    }
+
+    async with httpx.AsyncClient(timeout=60.0) as client:
+        response = await client.post(YARNGPT_API_URL, headers=headers, json=payload)
+
+        if not response.is_success:
+            error_body = response.text
+            raise ValueError(
+                f"YarnGPT API error {response.status_code}: {error_body}"
+            )
+
+        content_type = response.headers.get("content-type", "")
+
+        # Some TTS APIs return JSON with an audio URL instead of raw bytes
+        if "application/json" in content_type:
+            data = response.json()
+            audio_url = data.get("audio_url") or data.get("url") or data.get("audio")
+            if not audio_url:
+                raise ValueError(f"YarnGPT returned JSON but no audio URL: {data}")
+            audio_response = await client.get(audio_url)
+            audio_response.raise_for_status()
+            return audio_response.content
+
+        return response.content
+
+
+async def _elevenlabs_generate(
+    text: str,
+    language: str,
+    voice_id: Optional[str] = None
+) -> bytes:
+    """Call ElevenLabs TTS and return raw audio bytes."""
     api_key = os.environ.get("ELEVENLABS_API_KEY")
     if not api_key:
         raise ValueError("ELEVENLABS_API_KEY environment variable is not set")
 
     effective_voice_id = voice_id or LANGUAGE_VOICE_IDS.get(language, LANGUAGE_VOICE_IDS['en'])
-
-    # Truncate text intelligently at a sentence boundary
     truncated_text = _truncate_at_sentence(text, MAX_CHARS)
 
     url = f"{ELEVENLABS_API_URL}/{effective_voice_id}"
@@ -61,8 +106,8 @@ async def generate_speech(
         "text": truncated_text,
         "model_id": ELEVENLABS_MODEL,
         "voice_settings": {
-            "stability": 0.70,         # higher = steadier, less wavering (0.55 was too low)
-            "similarity_boost": 0.75,  # slight reduction prevents over-processed / tinny sound
+            "stability": 0.70,
+            "similarity_boost": 0.75,
             "style": 0.0,
             "use_speaker_boost": True,
         },
