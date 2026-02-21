@@ -15,6 +15,13 @@ import {
   AssistLanguageCode,
   AssistTriageResult,
 } from '../types/triage';
+import {
+  OpenERAlert,
+  OpenEREmergencyAssessment,
+  OpenERHospital,
+  OpenERIncidentType,
+  OpenERReadinessCard,
+} from '../types/opener';
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL || 'http://localhost:8000';
 
@@ -253,4 +260,82 @@ export async function getCopilotGuidelineSources(): Promise<{
   parsed_breakdown: Record<string, number>;
 }> {
   return apiFetch('/copilot/guidelines/sources');
+}
+
+// ─── OpenER ──────────────────────────────────────────────────────────────────
+
+export async function getOpenERHospitals(): Promise<{ hospitals: OpenERHospital[] }> {
+  return apiFetch('/opener/hospitals');
+}
+
+export async function getOpenERReadiness(params: {
+  incidentType: OpenERIncidentType | string;
+  lat: number;
+  lng: number;
+}): Promise<{ incident_type: string; location: { lat: number; lng: number }; recommended_hospitals: OpenERReadinessCard[] }> {
+  const query = new URLSearchParams({
+    incident_type: params.incidentType,
+    lat: String(params.lat),
+    lng: String(params.lng),
+  }).toString();
+  return apiFetch(`/opener/hospitals/readiness?${query}`);
+}
+
+export async function assessOpenEREmergency(params: {
+  incidentType: OpenERIncidentType | string;
+  lat: number;
+  lng: number;
+  patientAge?: number;
+  sex?: string;
+  keySymptoms: string[];
+  vitals?: Record<string, string | number>;
+}): Promise<OpenEREmergencyAssessment> {
+  return apiFetch('/opener/emergencies/assess', {
+    method: 'POST',
+    body: JSON.stringify({
+      incident_type: params.incidentType,
+      location: { lat: params.lat, lng: params.lng },
+      patient_age: params.patientAge,
+      sex: params.sex,
+      key_symptoms: params.keySymptoms,
+      vitals: params.vitals || {},
+    }),
+  });
+}
+
+export async function dispatchOpenERAlert(params: {
+  emergencyId: string;
+  hospitalId: string;
+  etaMinutes: number;
+  summary: string;
+}): Promise<OpenERAlert> {
+  return apiFetch('/opener/alerts/dispatch', {
+    method: 'POST',
+    body: JSON.stringify({
+      emergency_id: params.emergencyId,
+      hospital_id: params.hospitalId,
+      eta_minutes: params.etaMinutes,
+      summary: params.summary,
+    }),
+  });
+}
+
+export async function updateOpenERHospital(
+  hospitalId: string,
+  payload: {
+    criticalBeds: number;
+    specialistsOnSeat: string[];
+    queueLevel: number;
+    notes?: string;
+  }
+): Promise<{ status: string; hospital: OpenERHospital }> {
+  return apiFetch(`/opener/hospitals/${hospitalId}/manual-update`, {
+    method: 'POST',
+    body: JSON.stringify({
+      critical_beds: payload.criticalBeds,
+      specialists_on_seat: payload.specialistsOnSeat,
+      queue_level: payload.queueLevel,
+      notes: payload.notes || '',
+    }),
+  });
 }

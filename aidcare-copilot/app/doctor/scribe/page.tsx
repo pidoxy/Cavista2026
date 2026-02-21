@@ -1,7 +1,6 @@
 'use client';
 
-import { useEffect } from 'react';
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import {
   clearSessionDoctor,
@@ -41,53 +40,90 @@ export default function DoctorScribePage() {
   }
 
   return (
-    <div className="min-h-screen bg-[#F8FAFC] px-4 py-10">
-      <div className="mx-auto w-full max-w-2xl">
-        <div className="mb-6">
-          <h1 className="text-2xl font-semibold text-gray-900">Shift started</h1>
-          <p className="mt-1 text-sm text-gray-600">
-            Welcome, {doctor.name}. Your session is active in {shift.ward}.
-          </p>
+    <div className="hospital-shell py-6 md:py-8">
+      <header className="hospital-topbar mb-4">
+        <div className="hospital-brand">
+          <span className="hospital-brand-mark">A</span>
+          <div>
+            <p className="hospital-brand-title">AidCare Shift Workspace</p>
+            <p className="hospital-brand-subtitle">Clinical Session Active</p>
+          </div>
         </div>
+        <div className="flex items-center gap-2">
+          <span className="hospital-chip hospital-chip-success">
+            <span className="hospital-live-dot" /> On Duty
+          </span>
+          <button onClick={() => router.push('/doctor')} className="hospital-btn hospital-btn-secondary">
+            Back to Login
+          </button>
+        </div>
+      </header>
 
-        <div className="rounded-2xl border border-gray-200 bg-white p-6 shadow-sm">
-          <p className="text-sm text-gray-700">
-            Shift ID: <span className="font-mono text-gray-900">{shift.shift_id}</span>
-          </p>
-          <p className="mt-2 text-sm text-gray-700">
-            Started: <span className="text-gray-900">{new Date(shift.started_at).toLocaleString()}</span>
-          </p>
-          <p className="mt-2 text-sm text-gray-700">
-            Duration: <span className="text-gray-900">{getShiftDuration(shift.started_at)}</span>
-          </p>
+      <div className="grid gap-4 lg:grid-cols-[1.2fr_0.8fr]">
+        <section className="hospital-card">
+          <div className="mb-4">
+            <p className="hospital-panel-title">Shift Context</p>
+            <h1 className="text-2xl font-semibold text-slate-900">{doctor.name}</h1>
+            <p className="mt-1 text-sm text-slate-600">{doctor.specialty} · {shift.ward}</p>
+          </div>
 
-          <p className="mt-6 rounded-lg bg-blue-50 px-3 py-2 text-xs text-blue-800">
-            Scribe workspace is scaffolded and ready for the next feature pass.
-          </p>
-          {error && <p className="mt-4 text-xs text-red-600">{error}</p>}
+          <div className="hospital-metric-grid mb-4">
+            <div className="hospital-metric">
+              <p className="hospital-metric-label">Shift ID</p>
+              <p className="hospital-metric-value text-[1rem] font-mono">{shift.shift_id.slice(0, 8)}...</p>
+              <p className="hospital-metric-note">Session token</p>
+            </div>
+            <div className="hospital-metric">
+              <p className="hospital-metric-label">Started</p>
+              <p className="hospital-metric-value text-[1rem]">{new Date(shift.started_at).toLocaleTimeString()}</p>
+              <p className="hospital-metric-note">{new Date(shift.started_at).toLocaleDateString()}</p>
+            </div>
+            <div className="hospital-metric">
+              <p className="hospital-metric-label">Duration</p>
+              <p className="hospital-metric-value text-[1rem]">{getShiftDuration(shift.started_at)}</p>
+              <p className="hospital-metric-note">Active duty window</p>
+            </div>
+          </div>
 
-          <div className="mt-6 flex gap-3">
-            <button
-              onClick={() => router.push('/doctor')}
-              className="rounded-lg border border-gray-300 px-4 py-2 text-sm text-gray-700 hover:bg-gray-50"
-            >
-              Back to Login
-            </button>
-            <button
-              onClick={() => router.push('/doctor/assist')}
-              className="rounded-lg border border-[#0066CC] px-4 py-2 text-sm font-medium text-[#0066CC] hover:bg-blue-50"
-            >
+          <div className="hospital-panel-muted mb-4">
+            <p className="hospital-panel-title">Clinical Notes Workspace</p>
+            <p className="text-sm text-slate-700">
+              This shift shell is ready for live scribing and decision support. Use Assist Mode for multilingual symptom intake,
+              guideline-backed urgency ranking, and quick action recommendations.
+            </p>
+          </div>
+
+          {error && <p className="hospital-alert hospital-alert-danger mb-3">{error}</p>}
+
+          <div className="flex flex-wrap gap-2">
+            <button onClick={() => router.push('/doctor/assist')} className="hospital-btn hospital-btn-primary">
               Open Assist Mode
             </button>
-            <button
-              onClick={handleEndShift}
-              disabled={ending}
-              className="rounded-lg bg-[#0066CC] px-4 py-2 text-sm font-medium text-white hover:bg-[#0052a3]"
-            >
+            <button onClick={() => router.push('/opener')} className="hospital-btn hospital-btn-secondary">
+              OpenER Routing
+            </button>
+            <button onClick={handleEndShift} disabled={ending} className="hospital-btn hospital-btn-danger">
               {ending ? 'Ending Shift...' : 'End Shift'}
             </button>
           </div>
-        </div>
+        </section>
+
+        <aside className="hospital-card space-y-3">
+          <div className="hospital-panel">
+            <p className="hospital-panel-title">Quick Checklist</p>
+            <ol className="list-decimal pl-5 text-sm text-slate-700 space-y-1">
+              <li>Confirm patient identity and chief complaint.</li>
+              <li>Run multilingual intake in Assist mode.</li>
+              <li>Escalate high-risk cases to OpenER dispatch.</li>
+            </ol>
+          </div>
+          <div className="hospital-panel">
+            <p className="hospital-panel-title">Handoff Reminder</p>
+            <p className="text-sm text-slate-700">
+              Keep recommendations explainable and cite evidence cards before escalation decisions.
+            </p>
+          </div>
+        </aside>
       </div>
     </div>
   );

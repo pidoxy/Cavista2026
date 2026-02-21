@@ -4,7 +4,7 @@ from dotenv import load_dotenv
 load_dotenv()  # Must be called BEFORE any pipeline imports that read os.environ at module level
 
 import asyncio
-from fastapi import FastAPI, File, UploadFile, HTTPException, Depends, Form, BackgroundTasks
+from fastapi import FastAPI, File, UploadFile, HTTPException, Depends, Form, BackgroundTasks, Query
 from fastapi.middleware.cors import CORSMiddleware
 import shutil
 import time
@@ -115,6 +115,34 @@ class CopilotTriageConversationInput(BaseModel):
 class CopilotTriageTextInput(BaseModel):
     transcript_text: str
     language: str = "en"
+
+
+class OpenERLocation(BaseModel):
+    lat: float
+    lng: float
+
+
+class OpenEREmergencyAssessInput(BaseModel):
+    incident_type: str
+    location: OpenERLocation
+    patient_age: int | None = None
+    sex: str | None = None
+    key_symptoms: list[str] = []
+    vitals: dict | None = None
+
+
+class OpenERAlertDispatchInput(BaseModel):
+    emergency_id: str
+    hospital_id: str
+    eta_minutes: int
+    summary: str
+
+
+class OpenERManualUpdateInput(BaseModel):
+    critical_beds: int
+    specialists_on_seat: list[str]
+    queue_level: int
+    notes: str | None = None
         
 # --- Environment Variable Checks & Setup ---
 if not os.environ.get("GOOGLE_API_KEY"):
@@ -157,6 +185,60 @@ DEFAULT_COPILOT_DOCTORS = [
         "ward": "Admin",
         "hospital": "AidCare Demo Hospital",
         "role": "admin",
+    },
+]
+
+OPENER_INCIDENT_SPECIALTY_MAP = {
+    "chest_pain": ["cardiology", "emergency"],
+    "ob_emergency": ["obstetrics", "gynecology", "emergency"],
+    "trauma": ["trauma", "surgery", "emergency"],
+    "stroke": ["neurology", "emergency"],
+}
+
+DEFAULT_OPENER_HOSPITALS = [
+    {
+        "hospital_id": "lagoon-ikeja",
+        "name": "Lagoon Hospital Ikeja",
+        "lat": 6.6018,
+        "lng": 3.3515,
+        "critical_beds": 3,
+        "specialists_on_seat": ["emergency", "cardiology", "obstetrics"],
+        "queue_level": 2,
+        "staff_load_status": "amber",
+        "last_updated": None,
+    },
+    {
+        "hospital_id": "luth-idiaraba",
+        "name": "LUTH Idi-Araba",
+        "lat": 6.5168,
+        "lng": 3.3636,
+        "critical_beds": 1,
+        "specialists_on_seat": ["emergency", "surgery", "neurology"],
+        "queue_level": 4,
+        "staff_load_status": "red",
+        "last_updated": None,
+    },
+    {
+        "hospital_id": "reddington-victoria",
+        "name": "Reddington Victoria Island",
+        "lat": 6.4281,
+        "lng": 3.4219,
+        "critical_beds": 4,
+        "specialists_on_seat": ["emergency", "cardiology", "trauma", "obstetrics"],
+        "queue_level": 1,
+        "staff_load_status": "green",
+        "last_updated": None,
+    },
+    {
+        "hospital_id": "lasuth-ikeja",
+        "name": "LASUTH Ikeja",
+        "lat": 6.5972,
+        "lng": 3.3500,
+        "critical_beds": 2,
+        "specialists_on_seat": ["emergency", "obstetrics", "gynecology"],
+        "queue_level": 3,
+        "staff_load_status": "amber",
+        "last_updated": None,
     },
 ]
 
@@ -239,6 +321,78 @@ def _format_local_evidence(docs: list[dict], top_k: int = 2) -> list[dict]:
         )
     return evidence
 
+
+def _seed_opener_state():
+    if "opener_hospitals" not in app_state:
+        app_state["opener_hospitals"] = [dict(item) for item in DEFAULT_OPENER_HOSPITALS]
+    if "opener_alerts" not in app_state:
+        app_state["opener_alerts"] = []
+
+
+def _haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    # Lightweight approximation good enough for city-scale routing demo
+    dlat = (lat2 - lat1) * 111.0
+    dlng = (lon2 - lon1) * 111.0
+    return (dlat ** 2 + dlng ** 2) ** 0.5
+
+
+def _eta_minutes(distance_km: float, queue_level: int) -> int:
+    traffic_penalty = queue_level * 2
+    base = int(round((distance_km / 0.6) + 8))  # city-speed approximation
+    return max(5, base + traffic_penalty)
+
+
+def _staff_capacity_value(status: str) -> float:
+    mapping = {"green": 1.0, "amber": 0.6, "red": 0.2}
+    return mapping.get((status or "").lower(), 0.6)
+
+
+def _required_specialties(incident_type: str) -> list[str]:
+    return OPENER_INCIDENT_SPECIALTY_MAP.get((incident_type or "").lower(), ["emergency"])
+
+
+def _readiness_card(hospital: dict, incident_type: str, src_lat: float, src_lng: float) -> dict:
+    required = _required_specialties(incident_type)
+    hospital_specs = [s.lower() for s in hospital.get("specialists_on_seat", [])]
+    match = 1.0 if any(spec in hospital_specs for spec in required) else 0.2
+    bed_score = min(1.0, max(0.0, hospital.get("critical_beds", 0) / 4))
+    dist_km = _haversine_km(src_lat, src_lng, hospital["lat"], hospital["lng"])
+    eta = _eta_minutes(dist_km, hospital.get("queue_level", 0))
+    eta_inverse = max(0.0, min(1.0, 1 - (eta / 60)))
+    staff_capacity = _staff_capacity_value(hospital.get("staff_load_status", "amber"))
+
+    final = (
+        0.35 * match
+        + 0.30 * bed_score
+        + 0.20 * eta_inverse
+        + 0.15 * staff_capacity
+    )
+    reasons = []
+    reasons.append("Specialist available" if match >= 1.0 else "Required specialist not on-seat")
+    reasons.append(f"{hospital.get('critical_beds', 0)} critical beds reported")
+    reasons.append(f"ETA ~{eta} minutes")
+    reasons.append(f"Staff load {hospital.get('staff_load_status', 'amber').upper()}")
+
+    if match < 1.0:
+        final *= 0.7
+    return {
+        "hospital_id": hospital["hospital_id"],
+        "hospital_name": hospital["name"],
+        "distance_km": round(dist_km, 2),
+        "eta_minutes": eta,
+        "bed_status": {"critical_beds": hospital.get("critical_beds", 0)},
+        "specialist_status": {
+            "required": required,
+            "on_seat": hospital.get("specialists_on_seat", []),
+            "match": match >= 1.0,
+        },
+        "staff_load_status": hospital.get("staff_load_status", "amber"),
+        "queue_level": hospital.get("queue_level", 0),
+        "final_score": round(final, 4),
+        "reasons": reasons,
+        "last_updated": hospital.get("last_updated"),
+    }
+
 # --- Lifespan Events for Model Loading ---
 @app.on_event("startup")
 async def startup_event():
@@ -250,6 +404,8 @@ async def startup_event():
             _ensure_seed_doctors(db)
         parsed_count = len(load_parsed_guidelines(force_reload=True))
         print(f"Parsed guideline entries loaded: {parsed_count}")
+        _seed_opener_state()
+        print(f"OpenER hospitals loaded: {len(app_state.get('opener_hospitals', []))}")
     except Exception as e:
         print(f"WARNING: Copilot tables/seed setup failed: {e}")
     
@@ -1415,6 +1571,121 @@ async def admin_stats():
         "rate_limit_stats": get_rate_limit_stats("global"),
         "timestamp": time.time()
     }
+
+
+# ===========================================================================
+# OPENER ENDPOINTS (Golden Hour Readiness Routing)
+# ===========================================================================
+
+@app.get("/opener/hospitals")
+async def opener_hospitals():
+    _seed_opener_state()
+    return {"hospitals": app_state.get("opener_hospitals", [])}
+
+
+@app.get("/opener/hospitals/readiness")
+async def opener_hospital_readiness(
+    incident_type: str = Query(...),
+    lat: float = Query(...),
+    lng: float = Query(...),
+):
+    _seed_opener_state()
+    hospitals = app_state.get("opener_hospitals", [])
+    cards = [_readiness_card(h, incident_type, lat, lng) for h in hospitals]
+    cards.sort(key=lambda x: x["final_score"], reverse=True)
+    return {
+        "incident_type": incident_type,
+        "location": {"lat": lat, "lng": lng},
+        "recommended_hospitals": cards,
+    }
+
+
+@app.post("/opener/emergencies/assess")
+async def opener_assess_emergency(payload: OpenEREmergencyAssessInput):
+    _seed_opener_state()
+    cards = [
+        _readiness_card(h, payload.incident_type, payload.location.lat, payload.location.lng)
+        for h in app_state.get("opener_hospitals", [])
+    ]
+    cards.sort(key=lambda x: x["final_score"], reverse=True)
+
+    emergency_id = str(uuid.uuid4())
+    symptoms = payload.key_symptoms or []
+    summary = (
+        f"{payload.incident_type.replace('_', ' ').title()} suspected. "
+        f"Symptoms: {', '.join(symptoms) if symptoms else 'not provided'}. "
+        f"Patient age: {payload.patient_age if payload.patient_age is not None else 'unknown'}."
+    )
+
+    if any("bleed" in s.lower() for s in symptoms) or payload.incident_type == "ob_emergency":
+        severity_band = "high"
+    elif any("pain" in s.lower() or "breath" in s.lower() for s in symptoms):
+        severity_band = "high"
+    elif len(symptoms) >= 2:
+        severity_band = "medium"
+    else:
+        severity_band = "low"
+
+    return {
+        "emergency_id": emergency_id,
+        "incident_type": payload.incident_type,
+        "severity_band": severity_band,
+        "emergency_summary": summary,
+        "recommended_hospitals": cards,
+    }
+
+
+@app.post("/opener/alerts/dispatch")
+async def opener_dispatch_alert(payload: OpenERAlertDispatchInput):
+    _seed_opener_state()
+    hospitals = app_state.get("opener_hospitals", [])
+    hospital = next((h for h in hospitals if h["hospital_id"] == payload.hospital_id), None)
+    if not hospital:
+        raise HTTPException(status_code=404, detail="Hospital not found")
+
+    alert_id = str(uuid.uuid4())
+    alert = {
+        "alert_id": alert_id,
+        "emergency_id": payload.emergency_id,
+        "hospital_id": payload.hospital_id,
+        "hospital_name": hospital["name"],
+        "eta_minutes": payload.eta_minutes,
+        "summary": payload.summary,
+        "ack_status": "ACKNOWLEDGED",
+        "ack_time": datetime.now(timezone.utc).isoformat(),
+    }
+    app_state["opener_alerts"].append(alert)
+    return alert
+
+
+@app.get("/opener/alerts")
+async def opener_alerts():
+    _seed_opener_state()
+    return {"alerts": app_state.get("opener_alerts", [])}
+
+
+@app.post("/opener/hospitals/{hospital_id}/manual-update")
+async def opener_manual_update(hospital_id: str, payload: OpenERManualUpdateInput):
+    _seed_opener_state()
+    hospitals = app_state.get("opener_hospitals", [])
+    for hospital in hospitals:
+        if hospital["hospital_id"] != hospital_id:
+            continue
+        hospital["critical_beds"] = max(0, payload.critical_beds)
+        hospital["specialists_on_seat"] = [s.lower().strip() for s in payload.specialists_on_seat if s.strip()]
+        hospital["queue_level"] = max(0, min(5, payload.queue_level))
+        # simple deterministic load proxy from queue + beds
+        if hospital["queue_level"] >= 4 and hospital["critical_beds"] <= 1:
+            hospital["staff_load_status"] = "red"
+        elif hospital["queue_level"] >= 2:
+            hospital["staff_load_status"] = "amber"
+        else:
+            hospital["staff_load_status"] = "green"
+        hospital["notes"] = payload.notes or ""
+        hospital["last_updated"] = datetime.now(timezone.utc).isoformat()
+        return {"status": "updated", "hospital": hospital}
+
+    raise HTTPException(status_code=404, detail="Hospital not found")
 
 
 # ===========================================================================

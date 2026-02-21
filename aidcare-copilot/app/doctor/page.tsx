@@ -1,9 +1,9 @@
 'use client';
-import { useCallback, useEffect, useState } from 'react';
+
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useRouter } from 'next/navigation';
-import { getDoctors, getErrorMessage } from '../../lib/api';
+import { getDoctors, getErrorMessage, startShift } from '../../lib/api';
 import { setSessionDoctor, setSessionShift, getSessionDoctor } from '../../lib/session';
-import { startShift } from '../../lib/api';
 import { Doctor } from '../../types';
 
 export default function DoctorLoginPage() {
@@ -14,6 +14,7 @@ export default function DoctorLoginPage() {
   const [loading, setLoading] = useState(true);
   const [starting, setStarting] = useState(false);
   const [error, setError] = useState('');
+  const [currentTime, setCurrentTime] = useState('');
 
   const loadDoctors = useCallback(async () => {
     setLoading(true);
@@ -40,14 +41,23 @@ export default function DoctorLoginPage() {
     loadDoctors();
   }, [router, loadDoctors]);
 
+  useEffect(() => {
+    setCurrentTime(new Date().toLocaleString());
+    const timer = setInterval(() => setCurrentTime(new Date().toLocaleString()), 60000);
+    return () => clearInterval(timer);
+  }, []);
+
+  const doctorProfiles = useMemo(() => doctors.filter((d) => d.role === 'doctor'), [doctors]);
+
   async function handleStart() {
     if (!selected) return;
     setStarting(true);
     setError('');
     try {
-      const shift = await startShift(selected.doctor_id, ward || selected.ward);
-      setSessionDoctor({ ...selected, ward: ward || selected.ward });
-      setSessionShift({ shift_id: shift.shift_id, started_at: shift.started_at, ward: ward || selected.ward });
+      const activeWard = ward || selected.ward;
+      const shift = await startShift(selected.doctor_id, activeWard);
+      setSessionDoctor({ ...selected, ward: activeWard });
+      setSessionShift({ shift_id: shift.shift_id, started_at: shift.started_at, ward: activeWard });
       router.push('/doctor/scribe');
     } catch (e: unknown) {
       setError(getErrorMessage(e, 'Failed to start shift.'));
@@ -56,89 +66,131 @@ export default function DoctorLoginPage() {
   }
 
   return (
-    <div className="min-h-screen flex flex-col items-center justify-center px-4 bg-[#F8FAFC]">
-      <div className="w-full max-w-sm">
-        {/* Logo */}
-        <div className="text-center mb-8">
-          <div className="inline-flex items-center gap-2 mb-3">
-            <div className="w-8 h-8 bg-[#0066CC] rounded-lg flex items-center justify-center">
-              <span className="text-white text-sm font-bold">A</span>
-            </div>
-            <span className="text-xl font-bold text-gray-900">AidCare</span>
-            <span className="text-xl font-light text-[#0066CC]">Copilot</span>
+    <div className="hospital-shell py-6 md:py-8">
+      <header className="hospital-topbar mb-4">
+        <div className="hospital-brand">
+          <span className="hospital-brand-mark">A</span>
+          <div>
+            <p className="hospital-brand-title">AidCare Clinical Console</p>
+            <p className="hospital-brand-subtitle">Doctor Shift Access</p>
           </div>
-          <p className="text-gray-500 text-sm">AI cognitive shield for doctors</p>
         </div>
+        <div className="flex items-center gap-2">
+          <span className="hospital-chip hospital-chip-success">
+            <span className="hospital-live-dot" /> Live System
+          </span>
+          <button onClick={() => router.push('/triage')} className="hospital-btn hospital-btn-secondary">
+            Public Triage
+          </button>
+          <button onClick={() => router.push('/admin')} className="hospital-btn hospital-btn-quiet">
+            Admin Dashboard
+          </button>
+        </div>
+      </header>
 
-        <div className="bg-white rounded-2xl border border-gray-200 p-6 shadow-sm">
-          <h1 className="text-lg font-semibold text-gray-900 mb-1">Good morning, Doctor.</h1>
-          <p className="text-sm text-gray-500 mb-5">Select your profile to begin your shift.</p>
+      <div className="grid gap-4 lg:grid-cols-[1.05fr_0.95fr]">
+        <section className="hospital-card">
+          <div className="mb-4 flex items-center justify-between gap-3">
+            <div>
+              <p className="hospital-panel-title">Shift Handoff</p>
+              <h1 className="text-2xl font-semibold text-slate-900">Start Clinical Session</h1>
+              <p className="mt-1 text-sm text-slate-600">Select attending profile and confirm assigned ward.</p>
+            </div>
+            <span className="hospital-chip hospital-chip-primary">Doctors {doctorProfiles.length}</span>
+          </div>
 
           {loading ? (
-            <div className="flex items-center justify-center py-8">
-              <div className="w-6 h-6 border-2 border-[#0066CC] border-t-transparent rounded-full spinner" />
+            <div className="hospital-panel-muted py-10">
+              <div className="mx-auto h-7 w-7 rounded-full border-2 border-[#0a65b4] border-t-transparent spinner" />
+              <p className="mt-3 text-center text-sm text-slate-600">Loading clinical roster...</p>
             </div>
           ) : (
             <>
-              <div className="space-y-2 mb-4">
-                {doctors.filter(d => d.role === 'doctor').map(doc => (
+              <div className="hospital-scroll space-y-2 pr-1">
+                {doctorProfiles.map((doc) => (
                   <button
                     key={doc.doctor_id}
-                    onClick={() => { setSelected(doc); setWard(doc.ward); }}
-                    className={`w-full text-left p-3 rounded-xl border transition-all ${
-                      selected?.doctor_id === doc.doctor_id
-                        ? 'border-[#0066CC] bg-blue-50'
-                        : 'border-gray-200 hover:border-gray-300 hover:bg-gray-50'
-                    }`}
+                    onClick={() => {
+                      setSelected(doc);
+                      setWard(doc.ward);
+                    }}
+                    className={`hospital-list-item ${selected?.doctor_id === doc.doctor_id ? 'active' : ''}`}
                   >
-                    <div className="font-medium text-gray-900 text-sm">{doc.name}</div>
-                    <div className="text-xs text-gray-500 mt-0.5">{doc.specialty} · {doc.ward}</div>
+                    <p className="text-sm font-semibold text-slate-900">{doc.name}</p>
+                    <p className="text-xs text-slate-600">{doc.specialty} · {doc.ward}</p>
                   </button>
                 ))}
               </div>
 
               {selected && (
-                <div className="mb-4">
-                  <label className="text-xs font-medium text-gray-600 block mb-1">Ward (confirm or update)</label>
+                <div className="mt-4">
+                  <label className="hospital-label">Ward Confirmation</label>
                   <input
                     type="text"
                     value={ward}
-                    onChange={e => setWard(e.target.value)}
-                    className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-[#0066CC]"
-                    placeholder="e.g. Ward C, A&E, ICU"
+                    onChange={(e) => setWard(e.target.value)}
+                    className="hospital-input"
+                    placeholder="e.g. Ward C, ICU, A&E"
                   />
                 </div>
               )}
 
-              {error && <p className="text-red-600 text-xs mb-3">{error}</p>}
-              {!loading && doctors.filter(d => d.role === 'doctor').length === 0 && (
-                <button
-                  onClick={loadDoctors}
-                  className="mb-3 rounded-lg border border-gray-300 px-3 py-1.5 text-xs text-gray-700 hover:bg-gray-50"
-                >
-                  Retry
+              {error && <p className="hospital-alert hospital-alert-danger mt-3">{error}</p>}
+
+              {!loading && doctorProfiles.length === 0 && (
+                <button onClick={loadDoctors} className="hospital-btn hospital-btn-secondary mt-3">
+                  Retry Roster Sync
                 </button>
               )}
 
-              <button
-                onClick={handleStart}
-                disabled={!selected || starting}
-                className="w-full bg-[#0066CC] text-white py-3 rounded-xl font-medium text-sm disabled:opacity-40 disabled:cursor-not-allowed hover:bg-[#0052a3] transition-colors"
-              >
-                {starting ? 'Starting shift...' : 'Start Shift →'}
-              </button>
+              <div className="mt-4 flex flex-wrap items-center gap-2">
+                <button
+                  onClick={handleStart}
+                  disabled={!selected || starting}
+                  className="hospital-btn hospital-btn-primary"
+                >
+                  {starting ? 'Starting Shift...' : 'Start Shift'}
+                </button>
+                <button onClick={() => router.push('/opener')} className="hospital-btn hospital-btn-secondary">
+                  OpenER Routing
+                </button>
+              </div>
             </>
           )}
-        </div>
+        </section>
 
-        <div className="text-center mt-4">
-          <button
-            onClick={() => router.push('/admin')}
-            className="text-sm text-gray-500 hover:text-[#0066CC] transition-colors"
-          >
-            I&apos;m an administrator →
-          </button>
-        </div>
+        <aside className="hospital-card space-y-3">
+          <div className="hospital-panel-muted">
+            <p className="hospital-panel-title">Facility Snapshot</p>
+            <div className="hospital-metric-grid">
+              <div className="hospital-metric">
+                <p className="hospital-metric-label">Profiles Loaded</p>
+                <p className="hospital-metric-value">{doctorProfiles.length}</p>
+                <p className="hospital-metric-note">Doctor records available</p>
+              </div>
+              <div className="hospital-metric">
+                <p className="hospital-metric-label">Selected Ward</p>
+                <p className="hospital-metric-value">{selected ? (ward || selected.ward) : '-'}</p>
+                <p className="hospital-metric-note">Current assignment</p>
+              </div>
+            </div>
+          </div>
+
+          <div className="hospital-panel">
+            <p className="hospital-panel-title">Workflow</p>
+            <ol className="list-decimal pl-5 text-sm text-slate-700 space-y-1">
+              <li>Select your profile from the live roster.</li>
+              <li>Confirm ward and begin shift session.</li>
+              <li>Open Assist mode for multilingual triage support.</li>
+            </ol>
+          </div>
+
+          <div className="hospital-panel">
+            <p className="hospital-panel-title">Current Time</p>
+            <p className="hospital-panel-value">{currentTime || '--'}</p>
+            <p className="mt-1 text-xs text-slate-600">Use this view as your handoff point before patient intake.</p>
+          </div>
+        </aside>
       </div>
     </div>
   );

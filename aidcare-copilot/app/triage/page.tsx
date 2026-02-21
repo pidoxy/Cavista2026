@@ -8,9 +8,9 @@ import {
   copilotProcessText,
   getCopilotGuidelineSources,
   getErrorMessage,
-} from '../../../lib/api';
-import { ASSIST_LANGUAGES, ASSIST_LANGUAGE_ORDER } from '../../../lib/languages';
-import { speakText, stopCurrentAudio } from '../../../lib/tts';
+} from '../../lib/api';
+import { ASSIST_LANGUAGES, ASSIST_LANGUAGE_ORDER } from '../../lib/languages';
+import { speakText, stopCurrentAudio } from '../../lib/tts';
 import {
   AssistLanguageCode,
   AssistMessage,
@@ -18,8 +18,7 @@ import {
   AssistRecordingState,
   AssistRiskLevel,
   AssistTriageResult,
-} from '../../../types/triage';
-import { getSessionDoctor } from '../../../lib/session';
+} from '../../types/triage';
 
 const RISK_STYLES: Record<AssistRiskLevel, string> = {
   high: 'hospital-risk-high',
@@ -27,10 +26,9 @@ const RISK_STYLES: Record<AssistRiskLevel, string> = {
   low: 'hospital-risk-low',
 };
 
-export default function DoctorAssistPage() {
+export default function TriagePage() {
   const router = useRouter();
-  const doctor = getSessionDoctor();
-
+  const [agreed, setAgreed] = useState(false);
   const [phase, setPhase] = useState<AssistPhase>('language_select');
   const [language, setLanguage] = useState<AssistLanguageCode>('en');
   const [messages, setMessages] = useState<AssistMessage[]>([]);
@@ -54,10 +52,9 @@ export default function DoctorAssistPage() {
   const lang = ASSIST_LANGUAGES[language];
 
   useEffect(() => {
-    if (!doctor) {
-      router.replace('/doctor');
-    }
-  }, [doctor, router]);
+    const hasAgreed = localStorage.getItem('aidcare_disclaimer_agreed') === 'true';
+    setAgreed(hasAgreed);
+  }, []);
 
   useEffect(() => {
     getCopilotGuidelineSources().then((data) => setSources(data.sources)).catch(() => null);
@@ -70,13 +67,14 @@ export default function DoctorAssistPage() {
   useEffect(() => {
     return () => {
       stopCurrentAudio();
-      if (recordingTimerRef.current) {
-        clearInterval(recordingTimerRef.current);
-      }
+      if (recordingTimerRef.current) clearInterval(recordingTimerRef.current);
     };
   }, []);
 
-  if (!doctor) return null;
+  function acceptDisclaimer() {
+    localStorage.setItem('aidcare_disclaimer_agreed', 'true');
+    setAgreed(true);
+  }
 
   function beginConversation() {
     setPhase('conversation');
@@ -87,12 +85,19 @@ export default function DoctorAssistPage() {
     setError('');
   }
 
+  function buildConversationHistory(msgs: AssistMessage[]): string {
+    return msgs
+      .filter((m) => m.role !== 'system')
+      .map((m) => `${m.role === 'user' ? 'PATIENT' : 'YOU'}: ${m.content}`)
+      .join('\n');
+  }
+
   async function handleSendMessage(prefill?: string) {
     const text = (prefill ?? inputText).trim();
     if (!text || loading) return;
 
-    setError('');
     setLoading(true);
+    setError('');
     if (!prefill) setInputText('');
 
     const userMessage: AssistMessage = { role: 'user', content: text };
@@ -101,22 +106,10 @@ export default function DoctorAssistPage() {
     setMessages(nextMessages);
     setConversationContext(nextContext);
 
-    await continueConversation(text, nextMessages, nextContext);
-    setLoading(false);
-  }
-
-  function buildConversationHistory(msgs: AssistMessage[]): string {
-    return msgs
-      .filter((m) => m.role !== 'system')
-      .map((m) => `${m.role === 'user' ? 'PATIENT' : 'YOU'}: ${m.content}`)
-      .join('\n');
-  }
-
-  async function continueConversation(userMessage: string, currentMessages: AssistMessage[], contextSnapshot: string[]) {
     try {
       const data = await copilotContinueConversation({
-        conversationHistory: buildConversationHistory(currentMessages),
-        latestMessage: userMessage,
+        conversationHistory: buildConversationHistory(nextMessages),
+        latestMessage: text,
         language,
       });
 
@@ -125,12 +118,14 @@ export default function DoctorAssistPage() {
       if (data.should_auto_complete || data.conversation_complete) {
         setAutoCompleting(true);
         setTimeout(() => {
-          completeAssessment(contextSnapshot);
+          completeAssessment(nextContext);
         }, 1300);
       }
     } catch (e: unknown) {
       setError(getErrorMessage(e, 'Unable to continue conversation.'));
-      setMessages((prev) => [...prev, { role: 'system', content: 'I could not process that. Please try again.' }]);
+      setMessages((prev) => [...prev, { role: 'system', content: 'Please try again.' }]);
+    } finally {
+      setLoading(false);
     }
   }
 
@@ -138,8 +133,8 @@ export default function DoctorAssistPage() {
     setLoading(true);
     setError('');
     try {
-      const fullText = (contextSnapshot || conversationContext).join(' ');
-      const triage = await copilotProcessText(fullText, language);
+      const text = (contextSnapshot || conversationContext).join(' ');
+      const triage = await copilotProcessText(text, language);
       setResult(triage);
       setPhase('results');
     } catch (e: unknown) {
@@ -160,7 +155,6 @@ export default function DoctorAssistPage() {
       recorder.ondataavailable = (event) => {
         if (event.data.size > 0) audioChunksRef.current.push(event.data);
       };
-
       recorder.onstop = () => {
         const blob = new Blob(audioChunksRef.current, { type: 'audio/webm' });
         setAudioBlob(blob);
@@ -171,9 +165,9 @@ export default function DoctorAssistPage() {
       recorder.start();
       setRecordingState('recording');
       setRecordingTime(0);
-      recordingTimerRef.current = setInterval(() => setRecordingTime((prev) => prev + 1), 1000);
+      recordingTimerRef.current = setInterval(() => setRecordingTime((v) => v + 1), 1000);
     } catch {
-      setError('Microphone access failed. Check browser permissions.');
+      setError('Microphone access failed.');
     }
   }
 
@@ -197,10 +191,9 @@ export default function DoctorAssistPage() {
 
   async function sendAudioMessage() {
     if (!audioBlob) return;
-    setError('');
-    setLoading(true);
     setRecordingState('processing');
-
+    setLoading(true);
+    setError('');
     try {
       const triage = await copilotProcessAudio(audioBlob, language);
       if (triage.transcript) {
@@ -209,19 +202,18 @@ export default function DoctorAssistPage() {
       setResult(triage);
       setPhase('results');
       setAudioBlob(null);
-      setRecordingTime(0);
       setRecordingState('idle');
+      setRecordingTime(0);
       audioChunksRef.current = [];
     } catch (e: unknown) {
-      setError(getErrorMessage(e, 'Audio processing failed. Try typing instead.'));
+      setError(getErrorMessage(e, 'Audio processing failed.'));
       setRecordingState('recorded');
     } finally {
       setLoading(false);
     }
   }
 
-  function resetAssist() {
-    stopCurrentAudio();
+  function resetAll() {
     setPhase('language_select');
     setMessages([]);
     setConversationContext([]);
@@ -230,6 +222,34 @@ export default function DoctorAssistPage() {
     setError('');
     setAutoCompleting(false);
     cancelRecording();
+    stopCurrentAudio();
+  }
+
+  if (!agreed) {
+    return (
+      <div className="hospital-shell py-10">
+        <div className="mx-auto max-w-3xl hospital-card">
+          <p className="hospital-chip hospital-chip-warning">Safety Disclaimer</p>
+          <h1 className="mt-3 text-3xl font-semibold text-slate-900">AidCare Public Triage Intake</h1>
+          <p className="mt-3 text-sm leading-relaxed text-slate-700">
+            This assistant provides initial guidance only. It does not replace licensed clinical diagnosis. For severe
+            symptoms, proceed to emergency care immediately.
+          </p>
+          <div className="hospital-separator" />
+          <div className="flex flex-wrap gap-2">
+            <button onClick={acceptDisclaimer} className="hospital-btn hospital-btn-primary">
+              I Understand, Continue
+            </button>
+            <button onClick={() => router.push('/doctor')} className="hospital-btn hospital-btn-secondary">
+              Doctor Console
+            </button>
+            <button onClick={() => router.push('/opener')} className="hospital-btn hospital-btn-quiet">
+              OpenER Routing
+            </button>
+          </div>
+        </div>
+      </div>
+    );
   }
 
   return (
@@ -238,43 +258,44 @@ export default function DoctorAssistPage() {
         <div className="hospital-brand">
           <span className="hospital-brand-mark">A</span>
           <div>
-            <p className="hospital-brand-title">AidCare Assist Station</p>
-            <p className="hospital-brand-subtitle">Doctor: {doctor.name}</p>
+            <p className="hospital-brand-title">AidCare Triage Front Desk</p>
+            <p className="hospital-brand-subtitle">Community Symptom Intake</p>
           </div>
         </div>
         <div className="flex flex-wrap items-center gap-2">
-          <span className="hospital-chip hospital-chip-neutral">Ward {doctor.ward}</span>
-          <button onClick={() => router.push('/doctor/scribe')} className="hospital-btn hospital-btn-secondary">
-            Back to Shift
+          <button onClick={() => router.push('/doctor')} className="hospital-btn hospital-btn-secondary">
+            Doctor Console
           </button>
-          <button onClick={resetAssist} className="hospital-btn hospital-btn-quiet">
-            Reset Session
+          <button onClick={() => router.push('/opener')} className="hospital-btn hospital-btn-secondary">
+            OpenER
+          </button>
+          <button onClick={resetAll} className="hospital-btn hospital-btn-quiet">
+            Reset
           </button>
         </div>
       </header>
 
       {sources && (
         <p className="hospital-alert hospital-alert-info mb-3">
-          Knowledge sources loaded: CHW {sources.chw} • Clinical {sources.clinical} • Parsed {sources.parsed_guidelines}
+          Sources: CHW {sources.chw} • Clinical {sources.clinical} • Parsed {sources.parsed_guidelines}
         </p>
       )}
       {error && <p className="hospital-alert hospital-alert-danger mb-3">{error}</p>}
 
       {phase === 'language_select' && (
-        <div className="grid gap-4 lg:grid-cols-[1.15fr_0.85fr]">
+        <div className="grid gap-4 lg:grid-cols-[1.12fr_0.88fr]">
           <section className="hospital-card">
             <p className="hospital-panel-title">Step 1</p>
-            <h1 className="text-2xl font-semibold text-slate-900">Select Consultation Language</h1>
-            <p className="mt-1 text-sm text-slate-600">Choose the patient language before starting conversational triage.</p>
+            <h1 className="text-2xl font-semibold text-slate-900">Choose Language</h1>
+            <p className="mt-1 text-sm text-slate-600">Select preferred language for symptom conversation.</p>
             <div className="mt-4 grid gap-2 sm:grid-cols-2">
               {ASSIST_LANGUAGE_ORDER.map((code) => {
                 const item = ASSIST_LANGUAGES[code];
-                const active = code === language;
                 return (
                   <button
                     key={code}
                     onClick={() => setLanguage(code)}
-                    className={`hospital-list-item ${active ? 'active' : ''}`}
+                    className={`hospital-list-item ${language === code ? 'active' : ''}`}
                   >
                     <p className="text-sm font-semibold text-slate-900">{item.nativeName}</p>
                     <p className="text-xs text-slate-600">{item.name}</p>
@@ -283,34 +304,34 @@ export default function DoctorAssistPage() {
               })}
             </div>
             <button onClick={beginConversation} className="hospital-btn hospital-btn-primary mt-4">
-              Start Assist Session
+              Start Assessment
             </button>
           </section>
 
           <aside className="hospital-card space-y-3">
             <div className="hospital-panel-muted">
-              <p className="hospital-panel-title">Consult Flow</p>
+              <p className="hospital-panel-title">How It Works</p>
               <ol className="list-decimal pl-5 text-sm text-slate-700 space-y-1">
-                <li>Capture symptoms by text or voice.</li>
-                <li>Allow auto-complete when context is sufficient.</li>
-                <li>Review urgency and evidence before action.</li>
+                <li>Describe symptoms in your language.</li>
+                <li>Use voice recording if typing is difficult.</li>
+                <li>Review urgency and recommended next steps.</li>
               </ol>
             </div>
             <div className="hospital-panel">
-              <p className="hospital-panel-title">Preset Cases</p>
-              <p className="text-sm text-slate-700">Chest pain and postpartum emergency scenarios are available in conversation mode.</p>
+              <p className="hospital-panel-title">Emergency Escalation</p>
+              <p className="text-sm text-slate-700">For critical findings, route immediately to OpenER and alert a prepared facility.</p>
             </div>
           </aside>
         </div>
       )}
 
       {phase === 'conversation' && (
-        <div className="grid gap-4 xl:grid-cols-[1.35fr_0.8fr]">
+        <div className="grid gap-4 xl:grid-cols-[1.32fr_0.82fr]">
           <section className="hospital-card">
             <div className="mb-3 flex items-center justify-between">
               <div>
                 <p className="hospital-panel-title">Step 2</p>
-                <h2 className="text-xl font-semibold text-slate-900">Live Intake Conversation</h2>
+                <h2 className="text-xl font-semibold text-slate-900">Symptom Conversation</h2>
               </div>
               <div className="flex items-center gap-2">
                 <span className="hospital-chip hospital-chip-primary">{lang.nativeName}</span>
@@ -321,7 +342,7 @@ export default function DoctorAssistPage() {
             <div className="hospital-chat">
               {messages.map((msg, idx) => (
                 <div key={idx} className={`hospital-chat-row ${msg.role}`}>
-                  <p>{msg.content}</p>
+                  {msg.content}
                   {msg.role === 'assistant' && (
                     <button
                       onClick={() => speakText(msg.content, language, () => setSpeaking(true), () => setSpeaking(false))}
@@ -365,22 +386,22 @@ export default function DoctorAssistPage() {
               <p className="hospital-panel-title">Scenario Presets</p>
               <div className="space-y-2">
                 <button
-                  onClick={() => handleSendMessage('Severe chest pain started 30 minutes ago with sweating and shortness of breath.')}
+                  onClick={() => handleSendMessage('I have severe chest pain with sweating and shortness of breath for 30 minutes.')}
                   className="hospital-btn hospital-btn-secondary w-full text-left"
                 >
-                  Acute Chest Pain
+                  Chest Pain Emergency
                 </button>
                 <button
-                  onClick={() => handleSendMessage('Heavy bleeding after delivery with dizziness and weakness.')}
+                  onClick={() => handleSendMessage('Heavy bleeding after delivery and dizziness started 20 minutes ago.')}
                   className="hospital-btn hospital-btn-secondary w-full text-left"
                 >
-                  Postpartum Emergency
+                  Postpartum Bleeding
                 </button>
               </div>
             </div>
 
             <div className="hospital-panel-muted">
-              <p className="hospital-panel-title">Voice Intake</p>
+              <p className="hospital-panel-title">Voice Input</p>
               {recordingState === 'idle' && (
                 <button onClick={startRecording} className="hospital-btn hospital-btn-primary">
                   Start Recording
@@ -397,9 +418,9 @@ export default function DoctorAssistPage() {
               )}
               {recordingState === 'recorded' && (
                 <div className="space-y-2">
-                  <p className="text-sm text-slate-700">Recording captured and ready.</p>
+                  <p className="text-sm text-slate-700">Recording captured.</p>
                   <div className="flex gap-2">
-                    <button onClick={sendAudioMessage} className="hospital-btn hospital-btn-primary">Process</button>
+                    <button onClick={sendAudioMessage} className="hospital-btn hospital-btn-primary">Process Audio</button>
                     <button onClick={cancelRecording} className="hospital-btn hospital-btn-secondary">Discard</button>
                   </div>
                 </div>
@@ -416,12 +437,12 @@ export default function DoctorAssistPage() {
       )}
 
       {phase === 'results' && result && (
-        <div className="grid gap-4 xl:grid-cols-[1.25fr_0.85fr]">
+        <div className="grid gap-4 xl:grid-cols-[1.24fr_0.86fr]">
           <section className="hospital-card">
             <div className="mb-3 flex items-center justify-between">
               <div>
                 <p className="hospital-panel-title">Step 3</p>
-                <h2 className="text-xl font-semibold text-slate-900">Clinical Recommendation</h2>
+                <h2 className="text-xl font-semibold text-slate-900">Assessment Result</h2>
               </div>
               <span className={`hospital-chip ${RISK_STYLES[result.risk_level]}`}>
                 {lang.urgencyLabel}: {result.triage_recommendation.urgency_level}
@@ -431,28 +452,15 @@ export default function DoctorAssistPage() {
             <div className="hospital-panel-muted mb-3">
               <p className="text-sm text-slate-800">{result.triage_recommendation.summary_of_findings}</p>
               <button
-                onClick={() =>
-                  speakText(result.triage_recommendation.summary_of_findings, language, () => setSpeaking(true), () => setSpeaking(false))
-                }
+                onClick={() => speakText(result.triage_recommendation.summary_of_findings, language, () => setSpeaking(true), () => setSpeaking(false))}
                 className="hospital-btn hospital-btn-secondary mt-2"
               >
                 {speaking ? 'Speaking...' : lang.speakSummaryLabel}
               </button>
             </div>
 
-            {result.extracted_symptoms.length > 0 && (
-              <div className="mb-3">
-                <p className="hospital-panel-title">Extracted Symptoms</p>
-                <div className="flex flex-wrap gap-2">
-                  {result.extracted_symptoms.map((symptom, idx) => (
-                    <span key={idx} className="hospital-chip hospital-chip-neutral">{symptom}</span>
-                  ))}
-                </div>
-              </div>
-            )}
-
             <div className="mb-3">
-              <p className="hospital-panel-title">Recommended Actions</p>
+              <p className="hospital-panel-title">Actions</p>
               <ol className="list-decimal pl-5 text-sm text-slate-700 space-y-1">
                 {result.triage_recommendation.recommended_actions_for_chw.map((action, idx) => (
                   <li key={idx}>{action}</li>
@@ -461,15 +469,12 @@ export default function DoctorAssistPage() {
             </div>
 
             <div className="hospital-panel">
-              <p className="hospital-panel-title">Evidence Trail</p>
-              {result.evidence.length === 0 && <p className="text-sm text-slate-600">No evidence entries available.</p>}
+              <p className="hospital-panel-title">Evidence</p>
               <div className="space-y-2">
-                {result.evidence.map((item, idx) => (
-                  <div key={idx} className="hospital-panel-muted">
-                    <p className="text-xs font-semibold text-slate-800">
-                      {item.source_type} • {item.guideline_section}
-                    </p>
-                    <p className="mt-1 text-xs text-slate-600">{item.source_excerpt}</p>
+                {result.evidence.map((e, i) => (
+                  <div key={i} className="hospital-panel-muted">
+                    <p className="text-xs font-semibold text-slate-800">{e.source_type} • {e.guideline_section}</p>
+                    <p className="mt-1 text-xs text-slate-600">{e.source_excerpt}</p>
                   </div>
                 ))}
               </div>
@@ -478,20 +483,16 @@ export default function DoctorAssistPage() {
 
           <aside className="hospital-card space-y-3">
             <div className={`hospital-panel ${RISK_STYLES[result.risk_level]}`}>
-              <p className="hospital-panel-title">Risk Level</p>
+              <p className="hospital-panel-title">Risk Band</p>
               <p className="hospital-panel-value">{result.risk_level.toUpperCase()}</p>
             </div>
-
             <div className="hospital-panel">
-              <p className="hospital-panel-title">Next Actions</p>
+              <p className="hospital-panel-title">Next Step</p>
               <div className="space-y-2">
-                <button
-                  onClick={() => window.open('https://www.google.com/maps/search/hospital+near+me', '_blank')}
-                  className="hospital-btn hospital-btn-primary w-full"
-                >
-                  Find Nearest Hospital
+                <button onClick={() => router.push('/opener')} className="hospital-btn hospital-btn-primary w-full">
+                  Escalate via OpenER
                 </button>
-                <button onClick={resetAssist} className="hospital-btn hospital-btn-secondary w-full">
+                <button onClick={resetAll} className="hospital-btn hospital-btn-secondary w-full">
                   {lang.restartLabel}
                 </button>
               </div>
