@@ -3,7 +3,6 @@
 
 import {
   Doctor,
-  Shift,
   Consultation,
   SOAPNote,
   ScribeResult,

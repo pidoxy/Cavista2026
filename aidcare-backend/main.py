@@ -10,6 +10,7 @@ import shutil
 import time
 import json
 import uuid
+from datetime import datetime, timezone
 
 # --- AI pipeline modules ---
 from aidcare_pipeline.transcription import transcribe_audio_local, load_whisper_model
@@ -17,6 +18,7 @@ from aidcare_pipeline.symptom_extraction import extract_symptoms_with_gemini
 from aidcare_pipeline.clinical_info_extraction import extract_detailed_clinical_information 
 from aidcare_pipeline.clinical_support_generation import generate_clinical_support_details
 from aidcare_pipeline.document_processing import process_uploaded_document_task 
+from aidcare_pipeline.soap_generation import generate_soap_note
 
 from aidcare_pipeline.rag_retrieval import (
     get_chw_retriever,
@@ -27,13 +29,14 @@ from aidcare_pipeline.recommendation import generate_triage_recommendation
 from aidcare_pipeline.rate_limiter import get_rate_limit_stats, clear_cache, RateLimitExceeded
 from aidcare_pipeline.multilingual import generate_multilingual_response
 from aidcare_pipeline.tts_service import generate_speech, get_voice_id
+from aidcare_pipeline import copilot_crud, copilot_models
 # For Clinical Mode - Step 2 (You'll create this function/module later)
 # from aidcare_pipeline.clinical_support_generation import generate_clinical_support_details_with_gemini
 from pydantic import BaseModel
 from fastapi.responses import Response
 
 from aidcare_pipeline import crud, db_models 
-from aidcare_pipeline.database import get_db, engine 
+from aidcare_pipeline.database import get_db, engine, SessionLocal 
 from sqlalchemy.orm import Session
 
 # --- Pydantic Model for Text Input ---
@@ -66,9 +69,36 @@ class PatientCreate(BaseModel):
 class PatientResponse(BaseModel):
     patient_uuid: str
     full_name: str | None
-    # ... other fields to return ...
-    class Config:
-        orm_mode = True
+
+    model_config = {"from_attributes": True}
+
+
+class ShiftStartRequest(BaseModel):
+    doctor_uuid: str
+    ward: str
+
+
+class ShiftEndRequest(BaseModel):
+    doctor_uuid: str
+    shift_uuid: str
+
+
+class ConsultationSaveRequest(BaseModel):
+    doctor_uuid: str
+    shift_uuid: str
+    patient_ref: str
+    transcript: str
+    soap_note: dict
+    patient_summary: str
+    complexity_score: int = 1
+    flags: list[str] = []
+    language: str = "en"
+
+
+class HandoverRequest(BaseModel):
+    doctor_uuid: str
+    shift_uuid: str
+    handover_notes: str = ""
         
 # --- Environment Variable Checks & Setup ---
 if not os.environ.get("GOOGLE_API_KEY"):
@@ -87,10 +117,87 @@ os.makedirs(UPLOADED_PATIENT_DOCS_DIR, exist_ok=True)
 app = FastAPI(title="AidCare AI Assistant API")
 app_state = {} # To store loaded models/retrievers
 
+DEFAULT_COPILOT_DOCTORS = [
+    {
+        "doctor_uuid": "demo-doctor-1",
+        "full_name": "Dr. Ada Okafor",
+        "specialty": "General Medicine",
+        "ward": "A&E",
+        "hospital": "AidCare Demo Hospital",
+        "role": "doctor",
+    },
+    {
+        "doctor_uuid": "demo-doctor-2",
+        "full_name": "Dr. Musa Bello",
+        "specialty": "Internal Medicine",
+        "ward": "Ward C",
+        "hospital": "AidCare Demo Hospital",
+        "role": "doctor",
+    },
+    {
+        "doctor_uuid": "demo-admin-1",
+        "full_name": "Dr. Ifeoma Nwosu",
+        "specialty": "Operations",
+        "ward": "Admin",
+        "hospital": "AidCare Demo Hospital",
+        "role": "admin",
+    },
+]
+
+
+def _to_iso(dt):
+    return dt.isoformat() if dt else None
+
+
+def _serialize_doctor(doctor: copilot_models.Doctor):
+    return {
+        "doctor_id": doctor.doctor_uuid,
+        "name": doctor.full_name,
+        "specialty": doctor.specialty or "",
+        "ward": doctor.ward or "",
+        "hospital": doctor.hospital or "",
+        "role": doctor.role,
+    }
+
+
+def _compute_cls(consultations_count: int, hours_active: float, avg_complexity: float):
+    volume = min(40, consultations_count * 8)
+    complexity = min(30, int(round(avg_complexity * 6)))
+    duration = min(20, int(round(hours_active * 2)))
+    consecutive = 0
+    cls = min(100, volume + complexity + duration + consecutive)
+    if cls >= 70:
+        status = "red"
+    elif cls >= 40:
+        status = "amber"
+    else:
+        status = "green"
+    return cls, status, {
+        "volume": volume,
+        "complexity": complexity,
+        "duration": duration,
+        "consecutive": consecutive,
+    }
+
+
+def _ensure_seed_doctors(db: Session):
+    existing = copilot_crud.get_all_doctors(db)
+    if existing:
+        return
+    for doctor in DEFAULT_COPILOT_DOCTORS:
+        copilot_crud.create_doctor(db=db, **doctor)
+
 # --- Lifespan Events for Model Loading ---
 @app.on_event("startup")
 async def startup_event():
     print("FastAPI app starting up...")
+
+    try:
+        copilot_models.create_copilot_tables()
+        with SessionLocal() as db:
+            _ensure_seed_doctors(db)
+    except Exception as e:
+        print(f"WARNING: Copilot tables/seed setup failed: {e}")
     
     print("Initializing Whisper model...")
     load_whisper_model() # This loads the model into its module's global scope
@@ -155,6 +262,419 @@ def get_clinical_retriever_dependency() -> GuidelineRetriever:
         print("Error in dependency: Clinical Retriever not available in app_state.")
         raise HTTPException(status_code=503, detail="Clinical Support knowledge base not available. Please try again later.")
     return retriever
+
+# --- Copilot (Doctor/Admin) Endpoints ---
+@app.get("/doctor/list/")
+def list_doctors(db: Session = Depends(get_db)):
+    _ensure_seed_doctors(db)
+    doctors = copilot_crud.get_all_doctors(db)
+    return {"doctors": [_serialize_doctor(d) for d in doctors]}
+
+
+@app.get("/doctor/profile/{doctor_uuid}")
+def get_doctor_profile(doctor_uuid: str, db: Session = Depends(get_db)):
+    doctor = copilot_crud.get_doctor_by_uuid(db, doctor_uuid)
+    if not doctor:
+        raise HTTPException(status_code=404, detail="Doctor not found")
+    return _serialize_doctor(doctor)
+
+
+@app.post("/doctor/shifts/start/")
+def start_doctor_shift(payload: ShiftStartRequest, db: Session = Depends(get_db)):
+    doctor = copilot_crud.get_doctor_by_uuid(db, payload.doctor_uuid)
+    if not doctor:
+        raise HTTPException(status_code=404, detail="Doctor not found")
+    shift = copilot_crud.start_shift(
+        db=db,
+        shift_uuid=str(uuid.uuid4()),
+        doctor_id_int=doctor.id,
+        ward=(payload.ward or doctor.ward or "").strip(),
+    )
+    return {"shift_id": shift.shift_uuid, "started_at": _to_iso(shift.shift_start)}
+
+
+@app.post("/doctor/shifts/end/")
+def end_doctor_shift(payload: ShiftEndRequest, db: Session = Depends(get_db)):
+    doctor = copilot_crud.get_doctor_by_uuid(db, payload.doctor_uuid)
+    if not doctor:
+        raise HTTPException(status_code=404, detail="Doctor not found")
+
+    shift = copilot_crud.get_shift_by_uuid(db, payload.shift_uuid)
+    if not shift or shift.doctor_id != doctor.id:
+        raise HTTPException(status_code=404, detail="Shift not found")
+
+    ended = copilot_crud.end_shift(db, payload.shift_uuid)
+    consultations = copilot_crud.get_shift_consultations(db, shift.id)
+    avg_complexity = (
+        sum((c.complexity_score or 1) for c in consultations) / len(consultations)
+        if consultations
+        else 1.0
+    )
+    shift_start = ended.shift_start if ended and ended.shift_start else datetime.now(timezone.utc)
+    shift_end = ended.shift_end if ended and ended.shift_end else datetime.now(timezone.utc)
+    hours_active = max(0.0, (shift_end - shift_start).total_seconds() / 3600.0)
+    cls, status, breakdown = _compute_cls(len(consultations), hours_active, avg_complexity)
+    copilot_crud.save_burnout_score(
+        db=db,
+        score_uuid=str(uuid.uuid4()),
+        doctor_id_int=doctor.id,
+        shift_id_int=shift.id,
+        cls=cls,
+        status=status,
+        breakdown_dict=breakdown,
+        patients_seen=len(consultations),
+        hours_active=hours_active,
+        avg_complexity=avg_complexity,
+    )
+    return {"ended_at": _to_iso(ended.shift_end), "final_cls": cls, "status": status}
+
+
+@app.post("/doctor/consultations/")
+def save_doctor_consultation(payload: ConsultationSaveRequest, db: Session = Depends(get_db)):
+    doctor = copilot_crud.get_doctor_by_uuid(db, payload.doctor_uuid)
+    if not doctor:
+        raise HTTPException(status_code=404, detail="Doctor not found")
+
+    shift = copilot_crud.get_shift_by_uuid(db, payload.shift_uuid)
+    if not shift or shift.doctor_id != doctor.id:
+        raise HTTPException(status_code=404, detail="Shift not found")
+
+    consultation = copilot_crud.create_consultation(
+        db=db,
+        consultation_uuid=str(uuid.uuid4()),
+        doctor_id_int=doctor.id,
+        shift_id_int=shift.id,
+        patient_ref=payload.patient_ref,
+        transcript_text=payload.transcript,
+        soap_note_dict={"soap_note": payload.soap_note},
+        patient_summary=payload.patient_summary,
+        complexity_score=max(1, min(5, payload.complexity_score)),
+        flags=payload.flags,
+        language=payload.language,
+    )
+
+    consultations = copilot_crud.get_shift_consultations(db, shift.id)
+    avg_complexity = (
+        sum((c.complexity_score or 1) for c in consultations) / len(consultations)
+        if consultations
+        else 1.0
+    )
+    shift_start = shift.shift_start if shift.shift_start else datetime.now(timezone.utc)
+    hours_active = max(0.0, (datetime.now(timezone.utc) - shift_start).total_seconds() / 3600.0)
+    cls, status, breakdown = _compute_cls(len(consultations), hours_active, avg_complexity)
+    burnout = copilot_crud.save_burnout_score(
+        db=db,
+        score_uuid=str(uuid.uuid4()),
+        doctor_id_int=doctor.id,
+        shift_id_int=shift.id,
+        cls=cls,
+        status=status,
+        breakdown_dict=breakdown,
+        patients_seen=len(consultations),
+        hours_active=hours_active,
+        avg_complexity=avg_complexity,
+    )
+    return {
+        "consultation_id": consultation.consultation_uuid,
+        "saved_at": _to_iso(consultation.created_at),
+        "burnout_score": {
+            "cls": burnout.cognitive_load_score,
+            "status": burnout.status,
+        },
+    }
+
+
+@app.post("/doctor/scribe/")
+async def doctor_scribe(
+    audio_file: UploadFile = File(...),
+    doctor_uuid: str = Form(...),
+    patient_ref: str = Form(...),
+    language: str = Form("en"),
+    db: Session = Depends(get_db),
+):
+    doctor = copilot_crud.get_doctor_by_uuid(db, doctor_uuid)
+    if not doctor:
+        raise HTTPException(status_code=404, detail="Doctor not found")
+
+    unique_suffix = f"{int(time.time() * 1000)}_doctor_scribe_{audio_file.filename}"
+    file_path = os.path.join(TEMP_AUDIO_DIR, unique_suffix)
+
+    try:
+        with open(file_path, "wb") as buffer:
+            shutil.copyfileobj(audio_file.file, buffer)
+
+        transcript = transcribe_audio_local(file_path, language=language if language != "pcm" else None)
+        transcript = (transcript or "").strip()
+        if not transcript:
+            raise HTTPException(status_code=500, detail="Transcription failed or returned empty.")
+
+        soap_result = generate_soap_note(transcript=transcript, language=language)
+        return {
+            "doctor_id": doctor_uuid,
+            "patient_ref": patient_ref,
+            "transcript": transcript,
+            "soap_note": soap_result.get(
+                "soap_note",
+                {"subjective": "", "objective": "", "assessment": "", "plan": ""},
+            ),
+            "patient_summary": soap_result.get("patient_summary", ""),
+            "complexity_score": max(1, min(5, int(soap_result.get("complexity_score", 1)))),
+            "flags": soap_result.get("flags", []),
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Scribe processing failed: {str(e)}")
+    finally:
+        if os.path.exists(file_path):
+            try:
+                os.remove(file_path)
+            except Exception:
+                pass
+
+
+@app.get("/doctor/consultations/{doctor_uuid}")
+def get_doctor_consultations(doctor_uuid: str, shift_uuid: str, db: Session = Depends(get_db)):
+    doctor = copilot_crud.get_doctor_by_uuid(db, doctor_uuid)
+    if not doctor:
+        raise HTTPException(status_code=404, detail="Doctor not found")
+    shift = copilot_crud.get_shift_by_uuid(db, shift_uuid)
+    if not shift or shift.doctor_id != doctor.id:
+        raise HTTPException(status_code=404, detail="Shift not found")
+
+    consultations = copilot_crud.get_shift_consultations(db, shift.id)
+    return {
+        "consultations_count": len(consultations),
+        "consultations": [
+            {
+                "consultation_id": c.consultation_uuid,
+                "patient_ref": c.patient_ref or "",
+                "timestamp": _to_iso(c.created_at),
+                "transcript": c.transcript_text or "",
+                "soap_note": {
+                    "subjective": c.soap_subjective or "",
+                    "objective": c.soap_objective or "",
+                    "assessment": c.soap_assessment or "",
+                    "plan": c.soap_plan or "",
+                },
+                "patient_summary": c.patient_summary or "",
+                "complexity_score": c.complexity_score or 1,
+                "flags": c.flags or [],
+                "language": c.language or "en",
+            }
+            for c in consultations
+        ],
+    }
+
+
+@app.post("/doctor/handover/")
+def generate_doctor_handover(payload: HandoverRequest, db: Session = Depends(get_db)):
+    doctor = copilot_crud.get_doctor_by_uuid(db, payload.doctor_uuid)
+    if not doctor:
+        raise HTTPException(status_code=404, detail="Doctor not found")
+    shift = copilot_crud.get_shift_by_uuid(db, payload.shift_uuid)
+    if not shift or shift.doctor_id != doctor.id:
+        raise HTTPException(status_code=404, detail="Shift not found")
+
+    consultations = copilot_crud.get_shift_consultations(db, shift.id)
+    critical = []
+    stable = []
+    for c in consultations:
+        summary = c.patient_summary or c.transcript_text or "No summary available"
+        entry = {
+            "patient_ref": c.patient_ref or "Unknown",
+            "summary": summary[:240],
+        }
+        if (c.complexity_score or 1) >= 4 or (c.flags and len(c.flags) > 0):
+            critical.append({**entry, "action_required": "Review urgently", "flags": c.flags or []})
+        else:
+            stable.append(entry)
+
+    avg_complexity = (
+        sum((c.complexity_score or 1) for c in consultations) / len(consultations)
+        if consultations
+        else 0.0
+    )
+    report_payload = {
+        "handover_id": str(uuid.uuid4()),
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "doctor_name": doctor.full_name,
+        "shift_summary": {
+            "start": _to_iso(shift.shift_start),
+            "end": _to_iso(shift.shift_end),
+            "patients_seen": len(consultations),
+            "avg_complexity": round(avg_complexity, 2),
+        },
+        "critical_patients": critical,
+        "stable_patients": stable,
+        "discharged_patients": [],
+        "handover_notes": payload.handover_notes,
+    }
+    report_payload["plain_text_report"] = (
+        f"Handover for {doctor.full_name}. Patients: {len(consultations)}. "
+        f"Critical: {len(critical)}. Stable: {len(stable)}."
+    )
+
+    copilot_crud.save_handover_report(
+        db=db,
+        report_uuid=report_payload["handover_id"],
+        doctor_id_int=doctor.id,
+        shift_id_int=shift.id,
+        report_json=report_payload,
+        plain_text=report_payload["plain_text_report"],
+    )
+    return report_payload
+
+
+@app.get("/doctor/burnout/{doctor_uuid}")
+def get_doctor_burnout(doctor_uuid: str, db: Session = Depends(get_db)):
+    doctor = copilot_crud.get_doctor_by_uuid(db, doctor_uuid)
+    if not doctor:
+        raise HTTPException(status_code=404, detail="Doctor not found")
+    latest = copilot_crud.get_latest_burnout_score(db, doctor.id)
+    active_shift = copilot_crud.get_active_shift(db, doctor.id)
+    history = copilot_crud.get_burnout_history(db, doctor.id, days=7)
+
+    fallback_breakdown = {"volume": 0, "complexity": 0, "duration": 0, "consecutive": 0}
+    return {
+        "doctor_id": doctor.doctor_uuid,
+        "doctor_name": doctor.full_name,
+        "current_shift": (
+            {
+                "shift_id": active_shift.shift_uuid,
+                "start": _to_iso(active_shift.shift_start),
+                "patients_seen": latest.patients_seen if latest else 0,
+                "hours_active": latest.hours_active if latest else 0.0,
+            }
+            if active_shift
+            else None
+        ),
+        "cognitive_load_score": latest.cognitive_load_score if latest else 0,
+        "status": latest.status if latest else "green",
+        "score_breakdown": (
+            {
+                "volume": latest.volume_score,
+                "complexity": latest.complexity_score_component,
+                "duration": latest.duration_score,
+                "consecutive": latest.consecutive_shift_score,
+            }
+            if latest
+            else fallback_breakdown
+        ),
+        "history_7_days": [
+            {"date": _to_iso(item.recorded_at), "cls": item.cognitive_load_score, "status": item.status}
+            for item in history
+        ],
+        "recommendation": "Take short breaks and escalate complex cases early."
+        if (latest and latest.status != "green")
+        else "Current load is manageable.",
+    }
+
+
+@app.get("/admin/dashboard/")
+def admin_dashboard(db: Session = Depends(get_db)):
+    _ensure_seed_doctors(db)
+    doctors_with_scores = copilot_crud.get_all_active_doctors_with_burnout(db)
+    cards = []
+    red_zone_alerts = []
+    total_patients = 0
+    cls_values = []
+    red_count = 0
+    amber_count = 0
+    green_count = 0
+
+    for doctor, score in doctors_with_scores:
+        cls = score.cognitive_load_score if score else 0
+        status = score.status if score else "green"
+        patients_seen = score.patients_seen if score else 0
+        hours_active = score.hours_active if score else 0.0
+        total_patients += patients_seen
+        cls_values.append(cls)
+        if status == "red":
+            red_count += 1
+            red_zone_alerts.append(
+                {
+                    "doctor_id": doctor.doctor_uuid,
+                    "name": doctor.full_name,
+                    "cls": cls,
+                    "message": "High cognitive load. Prioritize support and redistribution.",
+                }
+            )
+        elif status == "amber":
+            amber_count += 1
+        else:
+            green_count += 1
+
+        cards.append(
+            {
+                "doctor_id": doctor.doctor_uuid,
+                "name": doctor.full_name,
+                "specialty": doctor.specialty or "",
+                "ward": doctor.ward or "",
+                "cls": cls,
+                "status": status,
+                "patients_seen": patients_seen,
+                "hours_active": hours_active,
+            }
+        )
+
+    return {
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "team_stats": {
+            "total_active": len(doctors_with_scores),
+            "red_count": red_count,
+            "amber_count": amber_count,
+            "green_count": green_count,
+            "avg_cls": round(sum(cls_values) / len(cls_values), 2) if cls_values else 0,
+            "total_patients_today": total_patients,
+        },
+        "doctors": cards,
+        "red_zone_alerts": red_zone_alerts,
+    }
+
+
+@app.get("/admin/doctor/{doctor_uuid}/detail")
+def admin_doctor_detail(doctor_uuid: str, db: Session = Depends(get_db)):
+    doctor = copilot_crud.get_doctor_by_uuid(db, doctor_uuid)
+    if not doctor:
+        raise HTTPException(status_code=404, detail="Doctor not found")
+    latest = copilot_crud.get_latest_burnout_score(db, doctor.id)
+    history = copilot_crud.get_burnout_history(db, doctor.id, days=7)
+    active_shift = copilot_crud.get_active_shift(db, doctor.id)
+    return {
+        "doctor": _serialize_doctor(doctor),
+        "current_shift": (
+            {
+                "shift_id": active_shift.shift_uuid,
+                "started_at": _to_iso(active_shift.shift_start),
+                "ward": active_shift.ward,
+                "is_active": active_shift.is_active,
+            }
+            if active_shift
+            else None
+        ),
+        "latest_burnout": (
+            {
+                "recorded_at": _to_iso(latest.recorded_at),
+                "cls": latest.cognitive_load_score,
+                "status": latest.status,
+                "patients_seen": latest.patients_seen,
+                "hours_active": latest.hours_active,
+            }
+            if latest
+            else None
+        ),
+        "burnout_history": [
+            {
+                "recorded_at": _to_iso(item.recorded_at),
+                "cls": item.cognitive_load_score,
+                "status": item.status,
+            }
+            for item in history
+        ],
+    }
 
 # --- API Endpoints ---
 @app.post("/patients/", response_model=PatientResponse) # Example
