@@ -66,6 +66,7 @@ export interface ScribeResult {
   flags: string[];
   medication_changes: MedicationChange[];
   burnout_score: { cls: number; status: BurnoutStatus } | null;
+  soap_error?: string;
 }
 
 export interface Patient {

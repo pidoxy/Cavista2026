@@ -4,7 +4,7 @@ import { useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import AppShell from '../../components/AppShell';
 import Icon from '../../components/Icon';
-import { getAdminDashboard, getAdminAllocation, getError } from '../../lib/api';
+import { getAdminDashboard, getAdminAllocation, getAdminOrganogram, invalidateAdminCache, getError } from '../../lib/api';
 import { getSessionUser } from '../../lib/session';
 
 // ── Types ─────────────────────────────────────────────────────────────────────
@@ -13,7 +13,9 @@ interface DoctorCard {
   doctor_id: string;
   name: string;
   specialty: string;
+  role?: string;
   ward_name: string;
+  hospital_name?: string;
   cls: number;
   status: 'green' | 'amber' | 'red';
   patients_seen: number;
@@ -48,9 +50,11 @@ interface DashboardData {
 interface Recommendation {
   id: string;
   source_ward: string;
+  source_hospital?: string;
   source_fatigue: number;
   source_available_staff: number;
   target_ward: string;
+  target_hospital?: string;
   target_fatigue: number;
   projected_fatigue_after: number;
   fatigue_reduction: string;
@@ -59,11 +63,36 @@ interface Recommendation {
 
 interface AllocationData {
   hospital_name: string;
-  overburdened_units: { ward_name: string; fatigue_index: number; patient_count: number; doctor_count: number }[];
-  stable_units: { ward_name: string; fatigue_index: number; patient_count: number; doctor_count: number }[];
+  hospitals_in_scope?: string[];
+  overburdened_units: { ward_name: string; hospital_name?: string; fatigue_index: number; patient_count: number; doctor_count: number }[];
+  stable_units: { ward_name: string; hospital_name?: string; fatigue_index: number; patient_count: number; doctor_count: number }[];
   recommendations: Recommendation[];
   overburdened_count: number;
   stable_count: number;
+}
+
+interface OrganogramOrg {
+  org_id: string;
+  name: string;
+  hospitals: {
+    hospital_id: string;
+    name: string;
+    wards: { ward_id: string; name: string; ward_type: string; doctors: { doctor_id: string; name: string; role: string; specialty: string; cls: number; status: string }[] }[];
+    admins: { doctor_id: string; name: string; role: string; specialty: string; cls: number; status: string }[];
+  }[];
+}
+
+interface OrganogramHospital {
+  hospital_id: string;
+  name: string;
+  wards: { ward_id: string; name: string; ward_type: string; doctors: { doctor_id: string; name: string; role: string; specialty: string; cls: number; status: string }[] }[];
+  admins: { doctor_id: string; name: string; role: string; specialty: string; cls: number; status: string }[];
+}
+
+interface OrganogramData {
+  scope: string;
+  organizations?: OrganogramOrg[];
+  hospitals?: OrganogramHospital[];
 }
 
 // ── Status helpers ─────────────────────────────────────────────────────────────
@@ -86,6 +115,134 @@ function CLSBar({ cls, status }: { cls: number; status: 'green' | 'amber' | 'red
   );
 }
 
+function DoctorChip({ d }: { d: { name: string; role: string; cls: number; status: string } }) {
+  const st = d.status as 'green' | 'amber' | 'red';
+  const cfg = STATUS_CONFIG[st];
+  return (
+    <div className={`inline-flex items-center gap-1.5 px-2 py-1 rounded-lg border text-xs ${cfg.badge}`}>
+      <span className="size-1.5 rounded-full bg-current opacity-80" />
+      <span className="font-medium text-slate-800">{d.name}</span>
+      <span className="text-slate-500">•</span>
+      <span className="text-slate-600">{d.role.replace(/_/g, ' ')}</span>
+      <span className="font-bold text-slate-900">CLS {d.cls}</span>
+    </div>
+  );
+}
+
+function OrganogramView({ data }: { data: OrganogramData }) {
+  if (data.organizations && data.organizations.length > 0) {
+    return (
+      <div className="space-y-6">
+        <h2 className="text-lg font-bold text-slate-900 flex items-center gap-2">
+          <Icon name="account_tree" className="text-xl text-slate-400" /> Organization Hierarchy
+        </h2>
+        <div className="space-y-6">
+          {data.organizations.map(org => (
+            <div key={org.org_id} className="bg-white rounded-xl border border-slate-200 overflow-hidden">
+              <div className="bg-slate-800 text-white px-5 py-4">
+                <h3 className="text-lg font-bold">{org.name}</h3>
+                <p className="text-slate-300 text-sm">Organization</p>
+              </div>
+              <div className="p-5 space-y-6">
+                {org.hospitals.map(h => (
+                  <div key={h.hospital_id} className="border border-slate-200 rounded-xl overflow-hidden">
+                    <div className="bg-slate-100 px-4 py-3 flex items-center gap-2">
+                      <Icon name="local_hospital" className="text-slate-500" />
+                      <span className="font-semibold text-slate-800">{h.name}</span>
+                      <span className="text-xs text-slate-500">Hospital</span>
+                    </div>
+                    <div className="p-4 space-y-4">
+                      {h.admins.length > 0 && (
+                        <div>
+                          <p className="text-xs font-semibold text-slate-500 uppercase tracking-wide mb-2">Hospital Admins</p>
+                          <div className="flex flex-wrap gap-2">
+                            {h.admins.map(a => (
+                              <DoctorChip key={a.doctor_id} d={a} />
+                            ))}
+                          </div>
+                        </div>
+                      )}
+                      {h.wards.map(w => (
+                        <div key={w.ward_id} className="border border-slate-100 rounded-lg p-3 bg-slate-50/50">
+                          <p className="text-sm font-semibold text-slate-700 mb-2 flex items-center gap-2">
+                            <Icon name="grid_view" className="text-slate-400" />
+                            {w.name} <span className="text-xs font-normal text-slate-500">({w.ward_type})</span>
+                          </p>
+                          <div className="flex flex-wrap gap-2">
+                            {w.doctors.map(d => (
+                              <DoctorChip key={d.doctor_id} d={d} />
+                            ))}
+                            {w.doctors.length === 0 && (
+                              <span className="text-xs text-slate-400 italic">No doctors assigned</span>
+                            )}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
+    );
+  }
+  if (data.hospitals && data.hospitals.length > 0) {
+    return (
+      <div className="space-y-6">
+        <h2 className="text-lg font-bold text-slate-900 flex items-center gap-2">
+          <Icon name="account_tree" className="text-xl text-slate-400" /> Hospital Hierarchy
+        </h2>
+        <div className="space-y-6">
+          {data.hospitals.map(h => (
+            <div key={h.hospital_id} className="bg-white rounded-xl border border-slate-200 overflow-hidden">
+              <div className="bg-slate-700 text-white px-5 py-4">
+                <h3 className="text-lg font-bold">{h.name}</h3>
+                <p className="text-slate-300 text-sm">Hospital</p>
+              </div>
+              <div className="p-5 space-y-4">
+                {h.admins.length > 0 && (
+                  <div>
+                    <p className="text-xs font-semibold text-slate-500 uppercase tracking-wide mb-2">Hospital Admins</p>
+                    <div className="flex flex-wrap gap-2">
+                      {h.admins.map(a => (
+                        <DoctorChip key={a.doctor_id} d={a} />
+                      ))}
+                    </div>
+                  </div>
+                )}
+                {h.wards.map(w => (
+                  <div key={w.ward_id} className="border border-slate-200 rounded-lg p-3 bg-slate-50/50">
+                    <p className="text-sm font-semibold text-slate-700 mb-2 flex items-center gap-2">
+                      <Icon name="grid_view" className="text-slate-400" />
+                      {w.name} <span className="text-xs font-normal text-slate-500">({w.ward_type})</span>
+                    </p>
+                    <div className="flex flex-wrap gap-2">
+                      {w.doctors.map(d => (
+                        <DoctorChip key={d.doctor_id} d={d} />
+                      ))}
+                      {w.doctors.length === 0 && (
+                        <span className="text-xs text-slate-400 italic">No doctors assigned</span>
+                      )}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
+    );
+  }
+  return (
+    <div className="bg-slate-50 border border-slate-200 rounded-xl p-8 text-center text-slate-500">
+      <Icon name="account_tree" className="text-4xl text-slate-300 mx-auto mb-2" />
+      <p>No hierarchy data available for your scope.</p>
+    </div>
+  );
+}
+
 // ── Component ─────────────────────────────────────────────────────────────────
 
 export default function AdminPage() {
@@ -94,6 +251,8 @@ export default function AdminPage() {
 
   const [dashboard, setDashboard] = useState<DashboardData | null>(null);
   const [allocation, setAllocation] = useState<AllocationData | null>(null);
+  const [organogram, setOrganogram] = useState<OrganogramData | null>(null);
+  const [activeTab, setActiveTab] = useState<'dashboard' | 'organogram'>('dashboard');
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
 
@@ -102,21 +261,27 @@ export default function AdminPage() {
     const isAdmin = ['super_admin', 'org_admin', 'hospital_admin', 'admin'].includes(user.role);
     if (!isAdmin) { router.push('/'); return; }
     load();
-  }, []);
+  }, [user?.doctor_id]);
 
-  async function load() {
+  async function load(forceRefresh = false) {
+    if (forceRefresh) invalidateAdminCache();
     setLoading(true);
     setError('');
+    const timeout = (ms: number) => new Promise<never>((_, reject) => setTimeout(() => reject(new Error('Request timed out')), ms));
     try {
-      const [dash, alloc] = await Promise.all([
-        getAdminDashboard(),
-        getAdminAllocation(),
-      ]);
-      setDashboard(dash as unknown as DashboardData);
-      setAllocation(alloc as unknown as AllocationData);
+      // Load dashboard first (cached returns instantly on revisit; 45s timeout for slow remote DB)
+      const dash = await Promise.race([getAdminDashboard(), timeout(45000)]);
+      setDashboard(dash as DashboardData);
+      setLoading(false);
+      // Load allocation and organogram in background (allocation can be slow with remote DB)
+      Promise.allSettled([getAdminAllocation(), getAdminOrganogram()]).then(([a, o]) => {
+        if (a.status === 'fulfilled') setAllocation(a.value as AllocationData);
+        else setError(prev => prev ? prev : 'Allocation: ' + getError(a.reason));
+        if (o.status === 'fulfilled') setOrganogram(o.value as OrganogramData);
+        else setError(prev => prev ? prev : 'Organogram: ' + getError(o.reason));
+      });
     } catch (err) {
       setError(getError(err));
-    } finally {
       setLoading(false);
     }
   }
@@ -147,9 +312,25 @@ export default function AdminPage() {
                 </p>
               )}
             </div>
-            <button onClick={load} className="flex items-center gap-2 h-9 px-4 rounded-lg border border-slate-200 bg-white text-slate-600 text-sm font-medium hover:bg-slate-50 transition">
-              <Icon name="refresh" className="text-lg" /> Refresh
-            </button>
+            <div className="flex items-center gap-2">
+              <div className="flex rounded-lg border border-slate-200 bg-white p-0.5">
+                <button
+                  onClick={() => setActiveTab('dashboard')}
+                  className={`px-4 py-1.5 text-sm font-medium rounded-md transition ${activeTab === 'dashboard' ? 'bg-primary text-white' : 'text-slate-600 hover:bg-slate-50'}`}
+                >
+                  Dashboard
+                </button>
+                <button
+                  onClick={() => setActiveTab('organogram')}
+                  className={`px-4 py-1.5 text-sm font-medium rounded-md transition ${activeTab === 'organogram' ? 'bg-primary text-white' : 'text-slate-600 hover:bg-slate-50'}`}
+                >
+                  Organogram
+                </button>
+              </div>
+              <button onClick={() => load(true)} className="flex items-center gap-2 h-9 px-4 rounded-lg border border-slate-200 bg-white text-slate-600 text-sm font-medium hover:bg-slate-50 transition">
+                <Icon name="refresh" className="text-lg" /> Refresh
+              </button>
+            </div>
           </div>
         </div>
 
@@ -157,7 +338,12 @@ export default function AdminPage() {
 
           {/* ── Error ── */}
           {error && (
-            <div className="bg-red-50 border border-red-100 rounded-xl px-4 py-3 text-sm text-red-700">{error}</div>
+            <div className="bg-red-50 border border-red-100 rounded-xl px-4 py-3 flex items-center justify-between gap-4">
+              <span className="text-sm text-red-700">{error}</span>
+              <button onClick={() => load(true)} className="flex items-center gap-2 px-4 py-2 rounded-lg bg-red-100 text-red-800 text-sm font-medium hover:bg-red-200 transition">
+                <Icon name="refresh" className="text-base" /> Retry
+              </button>
+            </div>
           )}
 
           {/* ── Loading ── */}
@@ -167,7 +353,11 @@ export default function AdminPage() {
             </div>
           )}
 
-          {!loading && dashboard && (
+          {!loading && activeTab === 'organogram' && organogram && (
+            <OrganogramView data={organogram} />
+          )}
+
+          {!loading && activeTab === 'dashboard' && dashboard && (
             <>
               {/* ── Red zone alert banner ── */}
               {hasRedAlerts && (
@@ -234,7 +424,11 @@ export default function AdminPage() {
                             </div>
                             <div>
                               <p className="text-sm font-bold text-slate-900">{doc.name}</p>
-                              <p className="text-[10px] text-slate-500">{doc.specialty}</p>
+                              <p className="text-[10px] text-slate-500">
+                                {doc.specialty}
+                                {doc.hospital_name && doc.ward_name && ` • ${doc.hospital_name}`}
+                                {doc.role && doc.role !== 'doctor' && ` • ${doc.role.replace(/_/g, ' ')}`}
+                              </p>
                             </div>
                           </div>
                           <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full border uppercase tracking-wide ${cfg.badge}`}>
@@ -242,7 +436,6 @@ export default function AdminPage() {
                           </span>
                         </div>
 
-                        {/* CLS gauge */}
                         <div className="mb-3">
                           <div className="flex justify-between items-center mb-1.5">
                             <span className="text-xs font-medium text-slate-500">Cognitive Load Score</span>
@@ -263,8 +456,8 @@ export default function AdminPage() {
                             <p className="text-[10px] text-slate-400">Active</p>
                           </div>
                           <div>
-                            <p className="text-sm font-bold text-slate-900">{doc.ward_name.split(' ')[0]}</p>
-                            <p className="text-[10px] text-slate-400">Ward</p>
+                            <p className="text-sm font-bold text-slate-900">{(doc.ward_name || doc.hospital_name || '—').split(' ')[0]}</p>
+                            <p className="text-[10px] text-slate-400">{doc.ward_name ? 'Ward' : 'Hospital'}</p>
                           </div>
                         </div>
 
@@ -299,6 +492,7 @@ export default function AdminPage() {
                           <div className="text-center sm:text-left min-w-[120px]">
                             <p className="text-[10px] text-slate-400 uppercase font-semibold mb-1">Transfer from</p>
                             <p className="text-sm font-bold text-slate-900">{rec.source_ward}</p>
+                            {rec.source_hospital && <p className="text-[10px] text-slate-500">{rec.source_hospital}</p>}
                             <div className="flex items-center gap-1 justify-center sm:justify-start mt-1">
                               <span className="size-2 rounded-full bg-emerald-500" />
                               <p className="text-xs text-slate-500">CLS {rec.source_fatigue}</p>
@@ -321,6 +515,7 @@ export default function AdminPage() {
                           <div className="text-center sm:text-right min-w-[120px]">
                             <p className="text-[10px] text-slate-400 uppercase font-semibold mb-1">To relieve</p>
                             <p className="text-sm font-bold text-slate-900">{rec.target_ward}</p>
+                            {rec.target_hospital && <p className="text-[10px] text-slate-500">{rec.target_hospital}</p>}
                             <div className="flex items-center gap-1 justify-center sm:justify-end mt-1">
                               <span className="size-2 rounded-full bg-red-500" />
                               <p className="text-xs text-slate-500">CLS {rec.target_fatigue}</p>
@@ -350,6 +545,9 @@ export default function AdminPage() {
                     <table className="w-full text-sm">
                       <thead>
                         <tr className="border-b border-slate-100 bg-slate-50">
+                          {(allocation.hospitals_in_scope?.length ?? 0) > 1 && (
+                            <th className="text-left px-5 py-3 text-xs font-semibold text-slate-500 uppercase tracking-wide">Hospital</th>
+                          )}
                           <th className="text-left px-5 py-3 text-xs font-semibold text-slate-500 uppercase tracking-wide">Ward</th>
                           <th className="text-left px-5 py-3 text-xs font-semibold text-slate-500 uppercase tracking-wide">Fatigue Index</th>
                           <th className="text-left px-5 py-3 text-xs font-semibold text-slate-500 uppercase tracking-wide">Patients</th>
@@ -361,8 +559,10 @@ export default function AdminPage() {
                         {[...allocation.overburdened_units, ...allocation.stable_units].map((u, i) => {
                           const fi = u.fatigue_index;
                           const st = fi >= 70 ? 'red' : fi >= 40 ? 'amber' : 'green';
+                          const showHospital = (allocation.hospitals_in_scope?.length ?? 0) > 1 && u.hospital_name;
                           return (
                             <tr key={i} className="border-b border-slate-50 last:border-0 hover:bg-slate-50 transition">
+                              {showHospital && <td className="px-5 py-3 text-slate-600">{u.hospital_name}</td>}
                               <td className="px-5 py-3 font-medium text-slate-900">{u.ward_name}</td>
                               <td className="px-5 py-3">
                                 <div className="flex items-center gap-2">

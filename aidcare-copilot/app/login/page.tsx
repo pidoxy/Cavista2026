@@ -41,7 +41,7 @@ export default function LoginPage() {
           <div className="inline-flex items-center justify-center size-14 rounded-2xl bg-primary/10 mb-4">
             <Icon name="medical_services" className="text-primary text-3xl" />
           </div>
-          <h1 className="text-2xl font-bold text-slate-900">AidCare</h1>
+          <h1 className="text-2xl font-bold text-slate-900">AidCare Copilot</h1>
           <p className="text-sm text-slate-500 mt-1">AI Clinical Copilot</p>
         </div>
 

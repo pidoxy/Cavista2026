@@ -1,7 +1,8 @@
 'use client';
 
-import { AuthTokenResponse, AuthUser, Patient, PatientDetail, ActionItem, ScribeResult, HandoverReport, Language } from '../types';
+import { AuthTokenResponse, AuthUser, Patient, PatientDetail, ActionItem, ScribeResult, HandoverReport, Language, MedicationChange } from '../types';
 import { getToken, clearSession } from './session';
+import { cachedFetch, clearCachePrefix } from './api-cache';
 
 const API = process.env.NEXT_PUBLIC_API_BASE_URL || 'https://cavista2026-production.up.railway.app';
 
@@ -103,36 +104,72 @@ export const getActiveShift = () =>
   api<{ shift: { shift_id: string; started_at: string; ward_id: string | null; ward_name: string | null } | null }>('/doctor/shifts/active');
 
 // ── Scribe ──
-export function transcribeAndScribe(audioBlob: Blob, patientUuid: string, patientRef: string, language: Language): Promise<ScribeResult> {
+export async function transcribeAndScribe(audioBlob: Blob, patientUuid: string, patientRef: string, language: Language): Promise<ScribeResult> {
   const fd = new FormData();
   fd.append('audio_file', audioBlob, 'recording.webm');
   fd.append('patient_uuid', patientUuid);
   fd.append('patient_ref', patientRef);
   fd.append('language', language);
-  return apiForm('/doctor/scribe/', fd);
+  const result = await apiForm<ScribeResult>('/doctor/scribe/', fd);
+  clearCachePrefix('burnout:');
+  clearCachePrefix('patients:');
+  clearCachePrefix('admin:');
+  return result;
+}
+
+export function regenerateScribeSoap(transcript: string, language: Language): Promise<{
+  soap_note: ScribeResult['soap_note'];
+  patient_summary: string;
+  complexity_score: number;
+  flags: string[];
+  medication_changes: MedicationChange[];
+  soap_error?: string;
+}> {
+  return api('/doctor/scribe/regenerate', {
+    method: 'POST',
+    body: JSON.stringify({ transcript, language }),
+  });
 }
 
 // ── Patients ──
-export const getPatients = (wardUuid?: string) =>
+const getPatientsRaw = (wardUuid?: string) =>
   api<{ total: number; patients: { critical: Patient[]; stable: Patient[]; discharged: Patient[] } }>(
     `/patients/${wardUuid ? `?ward_uuid=${wardUuid}` : ''}`
   );
 
-export const getPatientDetail = (uuid: string) => api<PatientDetail>(`/patients/${uuid}`);
+export const getPatients = (wardUuid?: string) =>
+  cachedFetch(`patients:list:${wardUuid ?? ''}`, () => getPatientsRaw(wardUuid));
 
-export const getPatientAISummary = (uuid: string) =>
+const getPatientDetailRaw = (uuid: string) => api<PatientDetail>(`/patients/${uuid}`);
+
+export const getPatientDetail = (uuid: string) =>
+  cachedFetch(`patients:detail:${uuid}`, () => getPatientDetailRaw(uuid));
+
+const getPatientAISummaryRaw = (uuid: string) =>
   api<{ chronic_conditions: { condition: string; details: string }[]; flagged_patterns: string[]; summary: string }>(
     `/patients/${uuid}/ai-summary`
   );
 
-export const createPatient = (params: Record<string, unknown>) =>
-  api<Patient>('/patients/', { method: 'POST', body: JSON.stringify(params) });
+export const getPatientAISummary = (uuid: string) =>
+  cachedFetch(`patients:ai-summary:${uuid}`, () => getPatientAISummaryRaw(uuid));
 
-export const createActionItem = (patientUuid: string, params: { description: string; priority?: string }) =>
-  api<ActionItem>(`/patients/${patientUuid}/action-items`, { method: 'POST', body: JSON.stringify(params) });
+export const createPatient = async (params: Record<string, unknown>) => {
+  const result = await api<Patient>('/patients/', { method: 'POST', body: JSON.stringify(params) });
+  clearCachePrefix('patients:');
+  return result;
+};
 
-export const completeActionItem = (itemUuid: string) =>
-  api<ActionItem>(`/patients/action-items/${itemUuid}/complete`, { method: 'PATCH' });
+export const createActionItem = async (patientUuid: string, params: { description: string; priority?: string }) => {
+  const result = await api<ActionItem>(`/patients/${patientUuid}/action-items`, { method: 'POST', body: JSON.stringify(params) });
+  clearCachePrefix('patients:');
+  return result;
+};
+
+export const completeActionItem = async (itemUuid: string) => {
+  const result = await api<ActionItem>(`/patients/action-items/${itemUuid}/complete`, { method: 'PATCH' });
+  clearCachePrefix('patients:');
+  return result;
+};
 
 // ── Handover ──
 export const generateHandover = (shiftUuid: string, wardUuid?: string, notes?: string) =>
@@ -148,14 +185,26 @@ export const getShiftConsultations = (shiftUuid: string) =>
 
 // ── Triage ──
 export const triageContinue = (params: { conversation_history: string; patient_message: string; staff_notes?: string; language: string }) =>
-  api<{ response: string; language: string; conversation_complete: boolean; should_auto_complete: boolean }>(
+  api<{ response: string; response_english?: string | null; language: string; conversation_complete: boolean; should_auto_complete: boolean }>(
     '/triage/conversation/continue', { method: 'POST', body: JSON.stringify(params) }
+  );
+
+export const triageTranslate = (text: string, sourceLanguage: string) =>
+  api<{ transcript_english: string | null; language: string }>(
+    '/triage/translate', { method: 'POST', body: JSON.stringify({ text, source_language: sourceLanguage }) }
   );
 
 export const triageProcessText = (transcript: string, language: string, staffNotes?: string) =>
   api<{ language: string; extracted_symptoms: string[]; triage_recommendation: Record<string, unknown>; risk_level: string }>(
     '/triage/process_text', { method: 'POST', body: JSON.stringify({ transcript_text: transcript, staff_notes: staffNotes || '', language }) }
   );
+
+export function triageTranscribe(audioBlob: Blob, language: string) {
+  const fd = new FormData();
+  fd.append('audio_file', audioBlob, 'triage.webm');
+  fd.append('language', language);
+  return apiForm<{ transcript: string; transcript_english?: string; language: string }>('/triage/transcribe', fd);
+}
 
 export function triageProcessAudio(audioBlob: Blob, language: string, staffNotes?: string) {
   const fd = new FormData();
@@ -165,11 +214,11 @@ export function triageProcessAudio(audioBlob: Blob, language: string, staffNotes
   return apiForm<Record<string, unknown>>('/triage/process_audio', fd);
 }
 
-export async function triageTTS(text: string, language: string): Promise<Blob> {
+export async function triageTTS(text: string, language: string, voiceId?: string): Promise<Blob> {
   const res = await fetch(`${API}/triage/tts`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', ...authHeaders() },
-    body: JSON.stringify({ text, language }),
+    body: JSON.stringify({ text, language, voice_id: voiceId || '' }),
   });
   if (!res.ok) throw new ApiError(res.status, 'TTS failed');
   return res.blob();
@@ -190,7 +239,7 @@ export const triageCreatePatient = (params: {
   );
 
 // ── Burnout ──
-export const getMyBurnout = () => api<{
+const getMyBurnoutRaw = () => api<{
   doctor_id: string;
   doctor_name: string;
   current_shift: { shift_id: string; start: string; patients_seen: number; hours_active: number } | null;
@@ -201,8 +250,10 @@ export const getMyBurnout = () => api<{
   recommendation: string;
 }>('/doctor/burnout/me');
 
+export const getMyBurnout = () => cachedFetch('burnout:me', getMyBurnoutRaw);
+
 // ── Admin ──
-export const getAdminDashboard = (wardUuid?: string) =>
+const getAdminDashboardRaw = (wardUuid?: string) =>
   api<{
     generated_at: string;
     team_stats: { total_active: number; red_count: number; amber_count: number; green_count: number; avg_cls: number; total_patients_today: number };
@@ -214,15 +265,51 @@ export const getAdminDashboard = (wardUuid?: string) =>
     red_zone_alerts: { doctor_id: string; name: string; cls: number; message: string }[];
   }>(`/admin/dashboard/${wardUuid ? `?ward_uuid=${wardUuid}` : ''}`);
 
-export const getAdminAllocation = () =>
+export const getAdminDashboard = (wardUuid?: string) =>
+  cachedFetch(`admin:dashboard:${wardUuid ?? ''}`, () => getAdminDashboardRaw(wardUuid));
+
+const getAdminAllocationRaw = (hospitalUuid?: string) =>
   api<{
     hospital_name: string;
-    overburdened_units: { ward_id: string; ward_name: string; ward_type: string; fatigue_index: number; patient_count: number; doctor_count: number; pat_doc_ratio: string; capacity: number; utilization: number; status: string }[];
-    stable_units: { ward_id: string; ward_name: string; ward_type: string; fatigue_index: number; patient_count: number; doctor_count: number; pat_doc_ratio: string; capacity: number; utilization: number; status: string }[];
-    recommendations: { id: string; source_ward: string; target_ward: string; source_fatigue: number; target_fatigue: number; projected_fatigue_after: number; fatigue_reduction: string; priority: string }[];
+    hospitals_in_scope: string[];
+    overburdened_units: { ward_id: string; ward_name: string; ward_type: string; hospital_name: string; fatigue_index: number; patient_count: number; doctor_count: number; pat_doc_ratio: string; capacity: number; utilization: number; status: string }[];
+    stable_units: { ward_id: string; ward_name: string; ward_type: string; hospital_name: string; fatigue_index: number; patient_count: number; doctor_count: number; pat_doc_ratio: string; capacity: number; utilization: number; status: string }[];
+    recommendations: { id: string; source_ward: string; source_hospital: string; target_ward: string; target_hospital: string; source_fatigue: number; target_fatigue: number; projected_fatigue_after: number; fatigue_reduction: string; priority: string }[];
     overburdened_count: number;
     stable_count: number;
-  }>('/admin/allocation');
+  }>(`/admin/allocation${hospitalUuid ? `?hospital_uuid=${hospitalUuid}` : ''}`);
+
+export const getAdminAllocation = (hospitalUuid?: string) =>
+  cachedFetch(`admin:allocation:${hospitalUuid ?? ''}`, () => getAdminAllocationRaw(hospitalUuid));
+
+const getAdminOrganogramRaw = () =>
+  api<{
+    scope: 'all' | 'org' | 'hospital' | 'ward';
+    organizations?: {
+      org_id: string;
+      name: string;
+      hospitals: {
+        hospital_id: string;
+        name: string;
+        wards: { ward_id: string; name: string; ward_type: string; doctors: { doctor_id: string; name: string; role: string; specialty: string; cls: number; status: string }[] }[];
+        admins: { doctor_id: string; name: string; role: string; specialty: string; cls: number; status: string }[];
+      }[];
+    }[];
+    hospitals?: {
+      hospital_id: string;
+      name: string;
+      wards: { ward_id: string; name: string; ward_type: string; doctors: { doctor_id: string; name: string; role: string; specialty: string; cls: number; status: string }[] }[];
+      admins: { doctor_id: string; name: string; role: string; specialty: string; cls: number; status: string }[];
+    }[];
+  }>('/admin/organogram');
+
+export const getAdminOrganogram = () => cachedFetch('admin:organogram', getAdminOrganogramRaw);
+
+/** Invalidate admin cache (call before refresh to force fresh data) */
+export const invalidateAdminCache = () => clearCachePrefix('admin:');
+
+/** Invalidate burnout cache */
+export const invalidateBurnoutCache = () => clearCachePrefix('burnout:');
 
 export const getWardStats = (wardUuid: string) =>
   api<{

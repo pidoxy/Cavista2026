@@ -82,26 +82,44 @@ def get_my_burnout(
 
 # --- Admin dashboard ---
 
-@router.get("/admin/dashboard/")
-def admin_dashboard(
-    ward_uuid: str | None = Query(None),
-    db: Session = Depends(get_db),
-    current_user: models.Doctor = Depends(require_role("super_admin", "org_admin", "hospital_admin", "admin")),
-):
+def _get_doctors_for_admin_scope(current_user: models.Doctor, db: Session, ward_uuid: str | None = None):
+    """Return doctors visible to admin based on role scope."""
     doctor_query = db.query(models.Doctor).filter(models.Doctor.is_active == True)
 
     if ward_uuid:
         ward = db.query(models.Ward).filter(models.Ward.ward_uuid == ward_uuid).first()
         if ward:
             doctor_query = doctor_query.filter(models.Doctor.ward_id == ward.id)
-    elif current_user.hospital_id:
+    elif current_user.role == "super_admin":
+        # Super admin sees all doctors across all organizations
+        pass
+    elif current_user.role == "org_admin" and current_user.hospital_id:
+        # Org admin sees all hospital admins and health workers in their org
         hospital = db.query(models.Hospital).filter(models.Hospital.id == current_user.hospital_id).first()
-        if hospital:
-            ward_ids = [w.id for w in hospital.wards]
-            if ward_ids:
-                doctor_query = doctor_query.filter(models.Doctor.ward_id.in_(ward_ids))
+        if hospital and hospital.org_id:
+            org_hospital_ids = [h.id for h in db.query(models.Hospital).filter(
+                models.Hospital.org_id == hospital.org_id
+            ).all()]
+            if org_hospital_ids:
+                doctor_query = doctor_query.filter(models.Doctor.hospital_id.in_(org_hospital_ids))
+    elif current_user.hospital_id:
+        # Hospital admin sees all health workers in their hospital
+        doctor_query = doctor_query.filter(models.Doctor.hospital_id == current_user.hospital_id)
+    else:
+        # Fallback: ward-only
+        if current_user.ward_id:
+            doctor_query = doctor_query.filter(models.Doctor.ward_id == current_user.ward_id)
 
-    doctors = doctor_query.all()
+    return doctor_query.all()
+
+
+@router.get("/admin/dashboard/")
+def admin_dashboard(
+    ward_uuid: str | None = Query(None),
+    db: Session = Depends(get_db),
+    current_user: models.Doctor = Depends(require_role("super_admin", "org_admin", "hospital_admin", "admin")),
+):
+    doctors = _get_doctors_for_admin_scope(current_user, db, ward_uuid)
     cards = []
     red_zone_alerts = []
     total_patients = 0
@@ -145,7 +163,9 @@ def admin_dashboard(
             "doctor_id": doctor.doctor_uuid,
             "name": doctor.full_name,
             "specialty": doctor.specialty or "",
+            "role": doctor.role,
             "ward_name": doctor.ward_rel.name if doctor.ward_rel else "",
+            "hospital_name": doctor.hospital.name if doctor.hospital else "",
             "cls": cls,
             "status": status,
             "patients_seen": patients_seen,
@@ -365,83 +385,205 @@ def get_ward_stats(
     }
 
 
+# --- Organogram (hierarchy with burnout) ---
+
+@router.get("/admin/organogram")
+def get_organogram(
+    db: Session = Depends(get_db),
+    current_user: models.Doctor = Depends(require_role("super_admin", "org_admin", "hospital_admin", "admin")),
+):
+    """Returns org → hospital → ward → doctors hierarchy with burnout status for the admin's scope."""
+    def _doctor_card(doc: models.Doctor) -> dict:
+        latest = (
+            db.query(models.BurnoutScore)
+            .filter(models.BurnoutScore.doctor_id == doc.id)
+            .order_by(models.BurnoutScore.recorded_at.desc())
+            .first()
+        )
+        return {
+            "doctor_id": doc.doctor_uuid,
+            "name": doc.full_name,
+            "role": doc.role,
+            "specialty": doc.specialty or "",
+            "cls": latest.cognitive_load_score if latest else 0,
+            "status": latest.status if latest else "green",
+        }
+
+    def _ward_node(ward: models.Ward) -> dict:
+        doctors = db.query(models.Doctor).filter(
+            models.Doctor.ward_id == ward.id, models.Doctor.is_active == True
+        ).all()
+        return {
+            "ward_id": ward.ward_uuid,
+            "name": ward.name,
+            "ward_type": ward.ward_type,
+            "doctors": [_doctor_card(d) for d in doctors],
+        }
+
+    def _hospital_node(hospital: models.Hospital) -> dict:
+        wards = db.query(models.Ward).filter(models.Ward.hospital_id == hospital.id).all()
+        # Include hospital admins (doctors with hospital_id but possibly no ward)
+        admins = db.query(models.Doctor).filter(
+            models.Doctor.hospital_id == hospital.id,
+            models.Doctor.is_active == True,
+            models.Doctor.role.in_(["hospital_admin", "org_admin"]),
+        ).all()
+        ward_doctor_ids = {d.id for w in wards for d in db.query(models.Doctor).filter(
+            models.Doctor.ward_id == w.id, models.Doctor.is_active == True
+        ).all()}
+        admin_cards = [_doctor_card(d) for d in admins if d.id not in ward_doctor_ids]
+        return {
+            "hospital_id": hospital.hospital_uuid,
+            "name": hospital.name,
+            "wards": [_ward_node(w) for w in wards],
+            "admins": admin_cards,
+        }
+
+    if current_user.role == "super_admin":
+        orgs = db.query(models.Organization).all()
+        return {
+            "scope": "all",
+            "organizations": [
+                {
+                    "org_id": o.org_uuid,
+                    "name": o.name,
+                    "hospitals": [_hospital_node(h) for h in db.query(models.Hospital).filter(
+                        models.Hospital.org_id == o.id
+                    ).all()],
+                }
+                for o in orgs
+            ],
+        }
+    elif current_user.role == "org_admin" and current_user.hospital_id:
+        hospital = db.query(models.Hospital).filter(models.Hospital.id == current_user.hospital_id).first()
+        if not hospital:
+            return {"scope": "org", "organizations": []}
+        org = db.query(models.Organization).filter(models.Organization.id == hospital.org_id).first()
+        if not org:
+            return {"scope": "org", "organizations": []}
+        org_hospitals = db.query(models.Hospital).filter(models.Hospital.org_id == org.id).all()
+        return {
+            "scope": "org",
+            "organizations": [{
+                "org_id": org.org_uuid,
+                "name": org.name,
+                "hospitals": [_hospital_node(h) for h in org_hospitals],
+            }],
+        }
+    elif current_user.hospital_id:
+        hospital = db.query(models.Hospital).filter(models.Hospital.id == current_user.hospital_id).first()
+        if not hospital:
+            return {"scope": "hospital", "hospitals": []}
+        return {
+            "scope": "hospital",
+            "hospitals": [_hospital_node(hospital)],
+        }
+    return {"scope": "ward", "hospitals": []}
+
+
 # --- Resource Allocation Engine ---
 
 @router.get("/admin/allocation")
 def get_allocation_data(
+    hospital_uuid: str | None = Query(None),
     db: Session = Depends(get_db),
     current_user: models.Doctor = Depends(require_role("super_admin", "org_admin", "hospital_admin", "admin")),
 ):
     """Cross-ward fatigue aggregation with AI transfer recommendations."""
-    hospital_id = current_user.hospital_id
-    if not hospital_id:
-        raise HTTPException(status_code=400, detail="No hospital assigned")
-
-    hospital = db.query(models.Hospital).filter(models.Hospital.id == hospital_id).first()
-    if not hospital:
-        raise HTTPException(status_code=404, detail="Hospital not found")
-
-    wards = db.query(models.Ward).filter(models.Ward.hospital_id == hospital.id).all()
+    if hospital_uuid:
+        hospital = db.query(models.Hospital).filter(models.Hospital.hospital_uuid == hospital_uuid).first()
+        if not hospital:
+            raise HTTPException(status_code=404, detail="Hospital not found")
+        # Verify access: super_admin ok; org_admin if hospital in their org; hospital_admin if their hospital
+        if current_user.role == "org_admin" and current_user.hospital_id:
+            user_org = db.query(models.Hospital).filter(models.Hospital.id == current_user.hospital_id).first()
+            if user_org and hospital.org_id != user_org.org_id:
+                raise HTTPException(status_code=403, detail="Hospital not in your organization")
+        elif current_user.role == "hospital_admin" and current_user.hospital_id != hospital.id:
+            raise HTTPException(status_code=403, detail="Hospital not in your scope")
+        hospitals_to_process = [hospital]
+    elif current_user.role == "org_admin" and current_user.hospital_id:
+        # Org admin without hospital_uuid: see all hospitals in their org
+        user_hosp = db.query(models.Hospital).filter(models.Hospital.id == current_user.hospital_id).first()
+        if not user_hosp:
+            raise HTTPException(status_code=400, detail="No hospital assigned")
+        hospitals_to_process = db.query(models.Hospital).filter(models.Hospital.org_id == user_hosp.org_id).all()
+    elif current_user.role == "super_admin":
+        hospitals_to_process = db.query(models.Hospital).limit(20).all()
+    elif current_user.hospital_id:
+        # Hospital admin: only their hospital
+        hospital = db.query(models.Hospital).filter(models.Hospital.id == current_user.hospital_id).first()
+        if not hospital:
+            raise HTTPException(status_code=404, detail="Hospital not found")
+        hospitals_to_process = [hospital]
+    else:
+        raise HTTPException(status_code=400, detail="No hospital assigned. Pass hospital_uuid to scope.")
 
     overburdened = []
     stable = []
+    all_recommendations = []
+    hospital_names = []
 
-    for ward in wards:
-        doctors = db.query(models.Doctor).filter(
-            models.Doctor.ward_id == ward.id, models.Doctor.is_active == True
-        ).all()
-        if not doctors:
-            continue
+    for hospital in hospitals_to_process:
+        wards = db.query(models.Ward).filter(models.Ward.hospital_id == hospital.id).all()
 
-        total_cls = 0
-        total_patients = 0
-        doc_count = len(doctors)
+        for ward in wards:
+            doctors = db.query(models.Doctor).filter(
+                models.Doctor.ward_id == ward.id, models.Doctor.is_active == True
+            ).all()
+            if not doctors:
+                continue
 
-        for doc in doctors:
-            latest = (
-                db.query(models.BurnoutScore)
-                .filter(models.BurnoutScore.doctor_id == doc.id)
-                .order_by(models.BurnoutScore.recorded_at.desc())
-                .first()
-            )
-            if latest:
-                total_cls += latest.cognitive_load_score
-                total_patients += latest.patients_seen or 0
+            total_cls = 0
+            total_patients = 0
+            doc_count = len(doctors)
 
-        avg_fatigue = round(total_cls / doc_count, 1) if doc_count else 0
-        patient_count = db.query(models.Patient).filter(
-            models.Patient.ward_id == ward.id, models.Patient.status != "discharged"
-        ).count()
-        pat_doc_ratio = f"{patient_count}:{doc_count}" if doc_count else "N/A"
+            for doc in doctors:
+                latest = (
+                    db.query(models.BurnoutScore)
+                    .filter(models.BurnoutScore.doctor_id == doc.id)
+                    .order_by(models.BurnoutScore.recorded_at.desc())
+                    .first()
+                )
+                if latest:
+                    total_cls += latest.cognitive_load_score
+                    total_patients += latest.patients_seen or 0
 
-        ward_data = {
-            "ward_id": ward.ward_uuid,
-            "ward_name": ward.name,
-            "ward_type": ward.ward_type,
-            "hospital_name": hospital.name,
-            "fatigue_index": avg_fatigue,
-            "patient_count": patient_count,
-            "doctor_count": doc_count,
-            "pat_doc_ratio": pat_doc_ratio,
-            "capacity": ward.capacity or 0,
-            "utilization": round((patient_count / ward.capacity) * 100) if ward.capacity else 0,
-            "status": "critical" if avg_fatigue >= 85 else "warning" if avg_fatigue >= 70 else "stable",
-        }
+            avg_fatigue = round(total_cls / doc_count, 1) if doc_count else 0
+            patient_count = db.query(models.Patient).filter(
+                models.Patient.ward_id == ward.id, models.Patient.status != "discharged"
+            ).count()
+            pat_doc_ratio = f"{patient_count}:{doc_count}" if doc_count else "N/A"
 
-        if avg_fatigue >= 70:
-            overburdened.append(ward_data)
-        else:
-            stable.append(ward_data)
+            ward_data = {
+                "ward_id": ward.ward_uuid,
+                "ward_name": ward.name,
+                "ward_type": ward.ward_type,
+                "hospital_name": hospital.name,
+                "fatigue_index": avg_fatigue,
+                "patient_count": patient_count,
+                "doctor_count": doc_count,
+                "pat_doc_ratio": pat_doc_ratio,
+                "capacity": ward.capacity or 0,
+                "utilization": round((patient_count / ward.capacity) * 100) if ward.capacity else 0,
+                "status": "critical" if avg_fatigue >= 85 else "warning" if avg_fatigue >= 70 else "stable",
+            }
+
+            if avg_fatigue >= 70:
+                overburdened.append(ward_data)
+            else:
+                stable.append(ward_data)
+
+        hospital_names.append(hospital.name)
 
     overburdened.sort(key=lambda x: x["fatigue_index"], reverse=True)
     stable.sort(key=lambda x: x["fatigue_index"])
 
-    recommendations = []
     for ob in overburdened:
         for st in stable:
             if st["doctor_count"] > 1 and st["fatigue_index"] < 50:
                 projected_fatigue = max(0, ob["fatigue_index"] - 15)
-                recommendations.append({
+                all_recommendations.append({
                     "id": f"REALLOC-{hash((ob['ward_id'], st['ward_id'])) % 10000:04d}",
                     "source_ward": st["ward_name"],
                     "source_hospital": st["hospital_name"],
@@ -458,10 +600,11 @@ def get_allocation_data(
                 break
 
     return {
-        "hospital_name": hospital.name,
+        "hospital_name": hospital_names[0] if len(hospital_names) == 1 else "Multiple",
+        "hospitals_in_scope": hospital_names,
         "overburdened_units": overburdened,
         "stable_units": stable,
-        "recommendations": recommendations,
+        "recommendations": all_recommendations,
         "overburdened_count": len(overburdened),
         "stable_count": len(stable),
     }

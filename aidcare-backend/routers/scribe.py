@@ -5,7 +5,8 @@ import uuid
 import shutil
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, Body
+from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from aidcare_pipeline.database import get_db
@@ -36,6 +37,35 @@ PIDGIN_PHRASES = [
     "i never chop medicine", "body dey hot me inside night",
     "e start from", "i just dey feel", "e come be like say",
 ]
+
+
+class RegenerateSoapBody(BaseModel):
+    transcript: str
+    language: str = "en"
+
+
+@router.post("/regenerate")
+async def regenerate_soap(
+    body: RegenerateSoapBody = Body(...),
+    current_user: models.Doctor = Depends(get_current_user),
+):
+    """Regenerate SOAP note from transcript text (no audio)."""
+    transcript = (body.transcript or "").strip()
+    if not transcript:
+        raise HTTPException(status_code=400, detail="Transcript is required.")
+    soap_result = generate_soap_note(transcript=transcript, language=body.language)
+    soap_note = soap_result.get(
+        "soap_note",
+        {"subjective": "", "objective": "", "assessment": "", "plan": ""},
+    )
+    return {
+        "soap_note": soap_note,
+        "patient_summary": soap_result.get("patient_summary", ""),
+        "complexity_score": max(1, min(5, int(soap_result.get("complexity_score", 1)))),
+        "flags": soap_result.get("flags", []),
+        "medication_changes": soap_result.get("medication_changes", []),
+        "soap_error": soap_result.get("error"),
+    }
 
 
 def _detect_pidgin(text: str) -> bool:
@@ -189,6 +219,7 @@ async def doctor_scribe(
             "flags": flags,
             "medication_changes": medication_changes,
             "burnout_score": burnout_data,
+            "soap_error": soap_result.get("error"),
         }
     except HTTPException:
         raise

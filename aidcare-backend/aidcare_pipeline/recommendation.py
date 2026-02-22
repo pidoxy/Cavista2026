@@ -9,7 +9,7 @@ import time
 from .rate_limiter import cached_gemini_call, RateLimitExceeded
 
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
-OPENAI_MODEL_RECOMMEND = os.getenv("OPENAI_MODEL_RECOMMEND", "gpt-4o-mini")
+OPENAI_MODEL_RECOMMEND = os.getenv("OPENAI_MODEL_RECOMMEND", "gpt-4o")
 
 
 @cached_gemini_call(ttl=3600, rate_limit_id="recommendation")

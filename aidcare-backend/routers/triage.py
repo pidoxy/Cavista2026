@@ -18,7 +18,7 @@ from aidcare_pipeline.auth import get_optional_user, get_current_user
 from aidcare_pipeline.transcription import transcribe_audio_local
 from aidcare_pipeline.symptom_extraction import extract_symptoms_with_gemini
 from aidcare_pipeline.recommendation import generate_triage_recommendation
-from aidcare_pipeline.multilingual import generate_multilingual_response, URGENT_KEYWORDS
+from aidcare_pipeline.multilingual import generate_multilingual_response, translate_to_english, URGENT_KEYWORDS
 from aidcare_pipeline.tts_service import generate_speech, get_voice_id
 from aidcare_pipeline.rag_retrieval import get_chw_retriever, GuidelineRetriever
 
@@ -109,6 +109,11 @@ async def continue_conversation(payload: ConversationInput):
             latest_message=payload.patient_message,
             language=payload.language,
         )
+        # Add English translation for transparency when using local languages
+        if payload.language and payload.language != "en" and result.get("response"):
+            result["response_english"] = translate_to_english(result["response"], payload.language)
+        else:
+            result["response_english"] = None
         return result
     except Exception as e:
         import traceback
@@ -147,6 +152,20 @@ async def process_text(payload: TriageTextInput):
             detail = recommendation.get("error") if isinstance(recommendation, dict) else "Unknown"
             raise HTTPException(status_code=500, detail=f"Recommendation failed: {detail}")
 
+        # Add English translations for transparency when using local languages
+        if language and language != "en":
+            summary = recommendation.get("summary_of_findings", "")
+            if summary:
+                recommendation["summary_english"] = translate_to_english(summary, language)
+            actions = recommendation.get("recommended_actions_for_chw", [])
+            if actions:
+                recommendation["recommended_actions_english"] = [
+                    translate_to_english(a, language) or a for a in actions
+                ]
+        else:
+            recommendation["summary_english"] = None
+            recommendation["recommended_actions_english"] = None
+
         urgency = recommendation.get("urgency_level", "")
         risk_level = _derive_risk_level(urgency)
 
@@ -163,6 +182,66 @@ async def process_text(payload: TriageTextInput):
         import traceback
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"Triage error: {str(e)}")
+
+
+# --- Translate to English (for transparency) ---
+
+class TranslateInput(BaseModel):
+    text: str
+    source_language: str = "en"
+
+
+@router.post("/translate")
+async def translate_to_english_endpoint(payload: TranslateInput):
+    """Translate patient text from a Nigerian language to English for transparency."""
+    if not payload.text or not payload.text.strip():
+        raise HTTPException(status_code=400, detail="Text cannot be empty.")
+    if payload.source_language == "en":
+        return {"transcript_english": None, "language": "en"}
+    result = translate_to_english(payload.text.strip(), payload.source_language)
+    return {"transcript_english": result, "language": payload.source_language}
+
+
+# --- Transcribe only (for continuous conversation) ---
+
+@router.post("/transcribe")
+async def transcribe_audio(
+    audio_file: UploadFile = File(...),
+    language: str = Form("en"),
+):
+    """Transcribe audio and optionally translate to English for transparency. No full triage."""
+    unique_suffix = f"{int(time.time() * 1000)}_transcribe_{audio_file.filename}"
+    file_path = os.path.join(TEMP_AUDIO_DIR, unique_suffix)
+
+    try:
+        with open(file_path, "wb") as buf:
+            shutil.copyfileobj(audio_file.file, buf)
+
+        transcript = transcribe_audio_local(file_path, language=language if language != "pcm" else None)
+        if not transcript:
+            raise HTTPException(status_code=500, detail="Transcription failed or returned empty.")
+
+        transcript_english = None
+        if language and language != "en":
+            transcript_english = translate_to_english(transcript, language)
+
+        return {
+            "transcript": transcript,
+            "transcript_english": transcript_english,
+            "language": language,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Transcription error: {str(e)}")
+    finally:
+        if os.path.exists(file_path):
+            try:
+                os.remove(file_path)
+            except Exception:
+                pass
 
 
 # --- Full triage from audio ---

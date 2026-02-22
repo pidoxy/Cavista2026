@@ -57,7 +57,7 @@ export default function DashboardPage() {
             Welcome back{user ? `, ${user.name.split(' ')[0]}` : ''}
           </h1>
           <p className="text-sm text-slate-500 mt-1">
-            {user?.hospital_name || 'AidCare'} {user?.ward_name ? `\u2022 ${user.ward_name}` : ''}
+            {user?.hospital_name || 'AidCare Copilot'} {user?.ward_name ? ` • ${user.ward_name}` : ''}
           </p>
         </div>
 
@@ -65,7 +65,7 @@ export default function DashboardPage() {
         <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 mb-8">
           <div className="bg-white rounded-xl border border-slate-200 p-4">
             <p className="text-xs font-medium text-slate-500 uppercase tracking-wider">Patients in Ward</p>
-            <p className="text-2xl font-bold text-slate-900 mt-1">{patientData?.total ?? '\u2014'}</p>
+            <p className="text-2xl font-bold text-slate-900 mt-1">{patientData?.total ?? '—'}</p>
             {patientData && patientData.critical > 0 && (
               <p className="text-xs font-semibold text-red-600 mt-1 flex items-center gap-1">
                 <span className="size-1.5 rounded-full bg-red-500 inline-block" />
@@ -82,7 +82,7 @@ export default function DashboardPage() {
                 </span>
               ) : shiftActive === false ? (
                 <span className="text-slate-500">No active shift</span>
-              ) : '\u2014'}
+              ) : '—'}
             </p>
             {shiftActive === false && (
               <button onClick={handleStartShift} className="mt-2 text-xs text-blue-600 hover:underline font-medium">
@@ -100,16 +100,16 @@ export default function DashboardPage() {
                   const now = new Date();
                   const mins = Math.floor((now.getTime() - start.getTime()) / 60000);
                   return `${Math.floor(mins / 60)}h ${mins % 60}m`;
-                })() : '\u2014'}
+                })() : '—'}
               </p>
             </div>
           ) : (
             <div className="bg-white rounded-xl border border-slate-200 p-4">
               <p className="text-xs font-medium text-slate-500 uppercase tracking-wider">Shift Duration</p>
-              <p className="text-2xl font-bold text-slate-900 mt-1">\u2014</p>
+              <p className="text-2xl font-bold text-slate-900 mt-1">—</p>
             </div>
           )}
-          <div className="bg-white rounded-xl border border-slate-200 p-4">
+          <a href="/burnout" className="bg-white rounded-xl border border-slate-200 p-4 hover:shadow-md hover:border-slate-300 transition-all block">
             <p className="text-xs font-medium text-slate-500 uppercase tracking-wider">Doctor Load</p>
             {burnout ? (
               <>
@@ -123,11 +123,15 @@ export default function DashboardPage() {
                 {burnout.status !== 'green' && (
                   <p className="text-[10px] text-slate-500 mt-1 leading-snug">{burnout.recommendation}</p>
                 )}
+                <p className="text-[10px] text-primary mt-1 font-medium">View tracking →</p>
               </>
             ) : (
-              <p className="text-2xl font-bold text-slate-900 mt-1">\u2014</p>
+              <>
+                <p className="text-2xl font-bold text-slate-900 mt-1">—</p>
+                <p className="text-[10px] text-slate-500 mt-1">Track after Scribe use</p>
+              </>
             )}
-          </div>
+          </a>
         </div>
 
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">

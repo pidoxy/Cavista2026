@@ -22,6 +22,7 @@ export default function PatientsPage() {
   const [aiLoading, setAiLoading] = useState(false);
   const [loading, setLoading] = useState(true);
   const [soapSearch, setSoapSearch] = useState('');
+  const [selectedConsultation, setSelectedConsultation] = useState<Consultation | null>(null);
 
   useEffect(() => {
     if (!user) { router.push('/login'); return; }
@@ -30,15 +31,29 @@ export default function PatientsPage() {
 
   async function loadAll() {
     try {
-      const d = await getPatients();
-      setGroups(d.patients);
-      const all = [...d.patients.critical, ...d.patients.stable, ...d.patients.discharged];
-      // If coming from triage with ?patient=<uuid>, open that patient directly
       const targetId = typeof window !== 'undefined'
         ? new URLSearchParams(window.location.search).get('patient')
         : null;
-      if (targetId) selectPatient(targetId);
-      else if (all.length > 0) selectPatient(all[0].patient_id);
+
+      if (targetId) {
+        // Parallel fetch: list + detail when we know which patient to show
+        const [d, detail] = await Promise.all([
+          getPatients(),
+          getPatientDetail(targetId).catch(() => null),
+        ]);
+        setGroups(d.patients);
+        if (detail) {
+          setDetail(detail);
+          setAiSummary(null);
+          setAiLoading(true);
+          getPatientAISummary(targetId).then(s => setAiSummary(s)).catch(() => {}).finally(() => setAiLoading(false));
+        }
+      } else {
+        const d = await getPatients();
+        setGroups(d.patients);
+        const all = [...d.patients.critical, ...d.patients.stable, ...d.patients.discharged];
+        if (all.length > 0) selectPatient(all[0].patient_id);
+      }
     } catch {} finally { setLoading(false); }
   }
 
@@ -75,13 +90,13 @@ export default function PatientsPage() {
   return (
     <div className="bg-slate-50 text-slate-900 min-h-screen flex flex-col">
       {/* ── Header ── */}
-      <header className="sticky top-0 z-50 flex items-center justify-between border-b border-slate-200 bg-white px-10 py-3 shadow-sm">
+      <header className="sticky top-0 z-50 flex items-center justify-between border-b border-slate-200 bg-white px-10 py-3 shadow-sm print:hidden">
         <div className="flex items-center gap-8">
           <div className="flex items-center gap-3 text-blue-600">
             <div className="size-8 bg-blue-600/10 flex items-center justify-center rounded-lg">
               <Icon name="medical_services" className="text-blue-600 text-xl" />
             </div>
-            <h2 className="text-slate-900 text-xl font-bold leading-tight tracking-tight">AidCare</h2>
+            <h2 className="text-slate-900 text-xl font-bold leading-tight tracking-tight">AidCare Copilot</h2>
           </div>
           <label className="hidden md:flex flex-col min-w-40 max-w-64">
             <div className="flex w-full items-stretch rounded-lg h-10 ring-1 ring-slate-200 focus-within:ring-2 focus-within:ring-blue-600">
@@ -115,7 +130,7 @@ export default function PatientsPage() {
       {/* ── Body ── */}
       <div className="flex flex-1 overflow-hidden">
         {/* ── LEFT: Patient list + Clinical Timeline ── */}
-        <aside className="w-80 border-r border-slate-200 bg-white overflow-y-auto hidden md:flex flex-col flex-shrink-0">
+        <aside className="w-80 border-r border-slate-200 bg-white overflow-y-auto hidden md:flex flex-col flex-shrink-0 print:hidden">
           {/* Patient list */}
           <div className="p-4 border-b border-slate-100 sticky top-0 bg-white z-10">
             <h3 className="text-slate-900 text-sm font-bold mb-2">Patients</h3>
@@ -155,7 +170,8 @@ export default function PatientsPage() {
               const type = getChipType(c);
               const chip = chipStyles[type];
               return (
-                <div key={c.consultation_id} className="relative z-10 pl-10 group cursor-pointer">
+                <div key={c.consultation_id} onClick={() => setSelectedConsultation(c)}
+                  className="relative z-10 pl-10 group cursor-pointer">
                   <div className={`absolute left-[9px] top-1 rounded-full ring-4 ring-white ${
                     isToday && i === 0 ? 'size-3 bg-blue-600' : 'size-2 bg-slate-300 group-hover:bg-blue-600 transition-colors'
                   }`} style={isToday && i === 0 ? { left: '9px' } : { left: '11px' }} />
@@ -195,8 +211,9 @@ export default function PatientsPage() {
                   <span className="text-slate-300">/</span>
                   <span className="text-slate-900 font-medium">{detail.full_name}</span>
                 </div>
-                <div className="flex items-center gap-3">
-                  <button className="hidden sm:flex items-center justify-center gap-2 h-9 px-4 rounded-lg border border-slate-200 bg-white text-slate-700 text-sm font-medium hover:bg-slate-50 transition-colors">
+                <div className="flex items-center gap-3 print:hidden">
+                  <button onClick={() => window.print()}
+                    className="hidden sm:flex items-center justify-center gap-2 h-9 px-4 rounded-lg border border-slate-200 bg-white text-slate-700 text-sm font-medium hover:bg-slate-50 transition-colors">
                     <Icon name="print" className="text-lg" /> Print Record
                   </button>
                   <button onClick={() => router.push(`/scribe?patient=${detail.patient_id}`)}
@@ -425,7 +442,7 @@ export default function PatientsPage() {
               <section className="flex flex-col gap-6">
                 <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
                   <h2 className="text-xl font-bold text-slate-900">Consultation History (SOAP)</h2>
-                  <div className="flex items-center gap-3">
+                  <div className="flex items-center gap-3 print:hidden">
                     <div className="relative">
                       <span className="absolute left-3 top-1/2 -translate-y-1/2">
                         <Icon name="search" className="text-slate-400 text-xl" />
@@ -445,7 +462,8 @@ export default function PatientsPage() {
                     const d = new Date(c.timestamp);
                     const type = getChipType(c);
                     return (
-                      <div key={c.consultation_id} className="bg-white rounded-xl border border-slate-200 p-5 hover:shadow-md transition-shadow cursor-pointer group">
+                      <div key={c.consultation_id} onClick={() => setSelectedConsultation(c)}
+                        className="bg-white rounded-xl border border-slate-200 p-5 hover:shadow-md transition-shadow cursor-pointer group">
                         <div className="flex justify-between items-start mb-3 border-b border-slate-100 pb-3">
                           <div>
                             <div className="flex items-center gap-2 mb-1">
@@ -461,7 +479,7 @@ export default function PatientsPage() {
                               {c.doctor_name ? ` \u2022 ${c.doctor_name}` : ''}
                             </p>
                           </div>
-                          <button className="text-slate-400 hover:text-blue-600">
+                          <button className="text-slate-400 hover:text-blue-600 print:hidden">
                             <Icon name="chevron_right" />
                           </button>
                         </div>
@@ -486,6 +504,81 @@ export default function PatientsPage() {
           )}
         </main>
       </div>
+
+      {/* Consultation detail modal */}
+      {selectedConsultation && (
+        <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4 print:hidden" onClick={() => setSelectedConsultation(null)}>
+          <div className="bg-white rounded-xl shadow-xl max-w-2xl w-full max-h-[90vh] overflow-hidden flex flex-col"
+            onClick={e => e.stopPropagation()}>
+            <div className="flex items-center justify-between px-6 py-4 border-b border-slate-200">
+              <h3 className="text-lg font-bold text-slate-900">
+                {selectedConsultation.patient_summary?.split('.')[0] || 'Consultation'}
+              </h3>
+              <button onClick={() => setSelectedConsultation(null)}
+                className="size-9 rounded-lg hover:bg-slate-100 flex items-center justify-center text-slate-500">
+                <Icon name="close" className="text-xl" />
+              </button>
+            </div>
+            <div className="flex-1 overflow-y-auto p-6 space-y-6">
+              <div className="flex items-center gap-2 text-sm text-slate-500">
+                <Icon name="calendar_today" className="text-lg" />
+                {new Date(selectedConsultation.timestamp).toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' })}
+                {selectedConsultation.doctor_name && (
+                  <span className="ml-2">• {selectedConsultation.doctor_name}</span>
+                )}
+              </div>
+              {selectedConsultation.transcript && (
+                <div>
+                  <h4 className="text-xs font-bold text-slate-500 uppercase tracking-wider mb-2">Transcript</h4>
+                  <p className="text-sm text-slate-700 whitespace-pre-wrap bg-slate-50 rounded-lg p-4 border border-slate-100">
+                    {selectedConsultation.transcript}
+                  </p>
+                </div>
+              )}
+              <div className="grid gap-4">
+                {(['subjective', 'objective', 'assessment', 'plan'] as const).map(s => (
+                  <div key={s}>
+                    <h4 className="text-xs font-bold text-slate-500 uppercase tracking-wider mb-2">{s}</h4>
+                    <p className="text-sm text-slate-700 whitespace-pre-wrap bg-slate-50 rounded-lg p-4 border border-slate-100">
+                      {selectedConsultation.soap_note[s] || '—'}
+                    </p>
+                  </div>
+                ))}
+              </div>
+              {selectedConsultation.flags && selectedConsultation.flags.length > 0 && (
+                <div>
+                  <h4 className="text-xs font-bold text-slate-500 uppercase tracking-wider mb-2">Flags</h4>
+                  <div className="flex flex-wrap gap-2">
+                    {selectedConsultation.flags.map((f, i) => (
+                      <span key={i} className="text-xs font-medium px-2.5 py-1 rounded-full bg-amber-50 text-amber-800 border border-amber-200">
+                        {f}
+                      </span>
+                    ))}
+                  </div>
+                </div>
+              )}
+              {selectedConsultation.medication_changes && selectedConsultation.medication_changes.length > 0 && (
+                <div>
+                  <h4 className="text-xs font-bold text-slate-500 uppercase tracking-wider mb-2">Medication Changes</h4>
+                  <ul className="space-y-1.5 text-sm text-slate-700">
+                    {selectedConsultation.medication_changes.map((m, i) => (
+                      <li key={i} className="flex items-center gap-2">
+                        <span className={`text-xs font-medium px-2 py-0.5 rounded ${
+                          m.action === 'started' ? 'bg-green-50 text-green-700' :
+                          m.action === 'stopped' ? 'bg-red-50 text-red-700' : 'bg-slate-100 text-slate-600'
+                        }`}>
+                          {m.action}
+                        </span>
+                        {m.drug}{m.dose ? ` — ${m.dose}` : ''}
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

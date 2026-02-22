@@ -1,6 +1,7 @@
 'use client';
 
 import { AuthUser } from '../types';
+import { clearApiCache } from './api-cache';
 
 const TOKEN_KEY = 'aidcare_token';
 const USER_KEY = 'aidcare_user';
@@ -36,6 +37,7 @@ export function clearSession() {
   localStorage.removeItem(TOKEN_KEY);
   localStorage.removeItem(USER_KEY);
   localStorage.removeItem(SHIFT_KEY);
+  clearApiCache();
 }
 
 export function getSessionShift(): SessionShift | null {

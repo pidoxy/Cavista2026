@@ -1,12 +1,11 @@
 # aidcare_pipeline/soap_generation.py
-import google.generativeai as genai
+# SOAP note generation via OpenAI GPT-4o-mini (replaces Gemini — better reliability)
 import json
 import os
 import time
 
-GEMINI_MODEL_SOAP = os.getenv("GEMINI_MODEL_SOAP", "gemini-2.0-flash-exp")
-
-_MODERN_GEMINI_PREFIXES = ("gemini-1.5", "gemini-2", "gemini-3")
+OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
+OPENAI_MODEL_SOAP = os.getenv("OPENAI_MODEL_SOAP", "gpt-4o")
 
 _FALLBACK_SOAP_RESPONSE = {
     "soap_note": {
@@ -23,7 +22,7 @@ _FALLBACK_SOAP_RESPONSE = {
 
 def generate_soap_note(transcript: str, language: str = "en") -> dict:
     """
-    Generates a structured SOAP note from a consultation transcript using Gemini.
+    Generates a structured SOAP note from a consultation transcript using OpenAI.
 
     Args:
         transcript: Raw consultation transcript text (may contain Nigerian English,
@@ -38,10 +37,9 @@ def generate_soap_note(transcript: str, language: str = "en") -> dict:
             flags             -> list of strings
         Falls back to empty-field dict on any error.
     """
-    GOOGLE_API_KEY = os.environ.get("GOOGLE_API_KEY")
-    if not GOOGLE_API_KEY:
-        print("ERROR (soap_generation): GOOGLE_API_KEY not found in environment.")
-        return {**_FALLBACK_SOAP_RESPONSE, "error": "Configuration error: Missing Google API Key."}
+    if not OPENAI_API_KEY:
+        print("ERROR (soap_generation): OPENAI_API_KEY not found in environment.")
+        return {**_FALLBACK_SOAP_RESPONSE, "error": "Configuration error: Missing OpenAI API Key."}
 
     system_instruction = (
         "You are an expert medical scribe for Nigerian doctors. "
@@ -81,63 +79,47 @@ Scoring guidance for complexity_score:
 
 If a section has no information, use an empty string "".
 Return ONLY the JSON object. Do not include any text before or after it.
-JSON Response:
 """
-
-    generation_config = genai.types.GenerationConfig(
-        temperature=0.15,
-        max_output_tokens=2048,
-    )
 
     max_retries = 2
     raw_json_str = ""
 
     for attempt in range(max_retries):
         try:
-            print(f"SOAP Gen - Attempt {attempt + 1} using model '{GEMINI_MODEL_SOAP}'...")
+            print(f"SOAP Gen - Attempt {attempt + 1} using model '{OPENAI_MODEL_SOAP}'...")
 
-            if GEMINI_MODEL_SOAP.startswith(_MODERN_GEMINI_PREFIXES):
-                model_to_use = genai.GenerativeModel(
-                    GEMINI_MODEL_SOAP,
-                    system_instruction=system_instruction,
-                    generation_config=generation_config,
-                )
-                full_prompt = prompt
-            else:
-                model_to_use = genai.GenerativeModel(
-                    GEMINI_MODEL_SOAP,
-                    generation_config=generation_config,
-                )
-                full_prompt = system_instruction + "\n\n" + prompt
+            from openai import OpenAI
+            client = OpenAI(api_key=OPENAI_API_KEY)
 
-            response = model_to_use.generate_content(full_prompt)
+            response = client.chat.completions.create(
+                model=OPENAI_MODEL_SOAP,
+                messages=[
+                    {"role": "system", "content": system_instruction},
+                    {"role": "user", "content": prompt},
+                ],
+                temperature=0.15,
+                max_tokens=2048,
+                response_format={"type": "json_object"},
+            )
 
-            raw_json_str = ""
-            if hasattr(response, "text") and response.text:
-                raw_json_str = response.text.strip()
-            elif response.parts:
-                raw_json_str = response.parts[0].text.strip()
-            else:
-                print(f"SOAP Gen - Warning: Gemini response has no text or parts (Attempt {attempt + 1}). Response: {response}")
+            raw_json_str = (response.choices[0].message.content or "").strip()
 
-            # Clean markdown fences (Gemini sometimes wraps JSON in them)
+            # Clean markdown fences (sometimes present)
             if raw_json_str.startswith("```json"):
                 raw_json_str = raw_json_str[len("```json"):]
             if raw_json_str.startswith("```"):
                 raw_json_str = raw_json_str[len("```"):]
             if raw_json_str.endswith("```"):
-                raw_json_str = raw_json_str[: -len("```")]
+                raw_json_str = raw_json_str[:-len("```")]
             raw_json_str = raw_json_str.strip()
 
-            print(f"SOAP Gen - Raw Gemini response snippet (Attempt {attempt + 1}): {raw_json_str[:300]}...")
+            print(f"SOAP Gen - Raw response snippet (Attempt {attempt + 1}): {raw_json_str[:300]}...")
 
             if not raw_json_str:
                 if attempt < max_retries - 1:
-                    print(f"SOAP Gen - Gemini returned empty string, retrying (Attempt {attempt + 1})...")
                     time.sleep(1 * (attempt + 1))
                     continue
-                print("SOAP Gen - Gemini returned an empty string after retries.")
-                return {**_FALLBACK_SOAP_RESPONSE, "error": "Gemini returned an empty response."}
+                return {**_FALLBACK_SOAP_RESPONSE, "error": "OpenAI returned an empty response."}
 
             parsed = json.loads(raw_json_str)
 
@@ -145,7 +127,6 @@ JSON Response:
             expected_keys = ["soap_note", "patient_summary", "complexity_score", "flags"]
             for key in expected_keys:
                 if key not in parsed:
-                    print(f"SOAP Gen - Warning: Response missing key '{key}'. Filling with default.")
                     if key == "soap_note":
                         parsed[key] = {"subjective": "", "objective": "", "assessment": "", "plan": ""}
                     elif key == "flags":
@@ -167,28 +148,23 @@ JSON Response:
             except (ValueError, TypeError):
                 parsed["complexity_score"] = 1
 
+            print("SOAP Gen - Generated successfully.")
             return parsed
 
         except json.JSONDecodeError as e:
-            print(f"SOAP Gen - JSONDecodeError (Attempt {attempt + 1}): '{raw_json_str[:200]}'. Error: {e}")
+            print(f"SOAP Gen - JSONDecodeError (Attempt {attempt + 1}): {e}")
             if attempt < max_retries - 1:
                 time.sleep(2 * (attempt + 1))
                 continue
             return {
                 **_FALLBACK_SOAP_RESPONSE,
-                "error": f"Failed to decode JSON for SOAP note after retries. Last snippet: {raw_json_str[:200]}",
+                "error": f"Failed to decode JSON for SOAP note. {str(e)}",
             }
         except Exception as e:
             print(f"SOAP Gen - Exception (Attempt {attempt + 1}): {e}")
             import traceback
             traceback.print_exc()
-            if (
-                "rate limit" in str(e).lower()
-                or "quota" in str(e).lower()
-                or "429" in str(e).lower()
-                or "resource has been exhausted" in str(e).lower()
-            ):
-                print("SOAP Gen - Rate limit / quota error detected.")
+            if "rate_limit" in str(e).lower() or "429" in str(e).lower():
                 if attempt < max_retries - 1:
                     time.sleep(10 * (attempt + 1))
                     continue

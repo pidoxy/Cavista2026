@@ -2,7 +2,7 @@ import type { Metadata } from 'next';
 import './globals.css';
 
 export const metadata: Metadata = {
-  title: 'AidCare',
+  title: 'AidCare Copilot',
   description: 'AI Clinical Copilot for Nigerian Healthcare',
 };
 

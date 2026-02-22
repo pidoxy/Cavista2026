@@ -4,25 +4,20 @@ import { useEffect, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import AppShell from '../../components/AppShell';
 import Icon from '../../components/Icon';
-import { triageContinue, triageProcessText, triageProcessAudio, triageTTS, triageSave, getPatients, createPatient, getError } from '../../lib/api';
+import { triageContinue, triageProcessText, triageTranscribe, triageTranslate, triageSave, getPatients, createPatient, getError } from '../../lib/api';
+import { LANGUAGES, getLanguage } from '../../lib/languages';
+import { speakText, stopCurrentAudio } from '../../lib/tts';
 import { Patient } from '../../types';
+import type { Language } from '../../types';
 
 type Phase = 'language' | 'conversation' | 'results';
-type Lang = 'en' | 'ha' | 'yo' | 'ig' | 'pcm';
 type RecState = 'idle' | 'recording' | 'processing';
 
 interface Msg {
   role: 'patient' | 'ai' | 'staff';
   content: string;
+  transcriptEnglish?: string; // English translation for transparency (local languages, voice only)
 }
-
-const LANGS: { code: Lang; name: string; native: string; greeting: string; color: string }[] = [
-  { code: 'en', name: 'English', native: 'English', greeting: 'Hello! How are you feeling today?', color: '#2563eb' },
-  { code: 'ha', name: 'Hausa', native: 'هَوُسَ', greeting: 'Sannu! Yaya zan iya taimaka maka yau?', color: '#059669' },
-  { code: 'yo', name: 'Yoruba', native: 'Yorùbá', greeting: 'Bawo ni! Kini mo le se fun e loni?', color: '#7c3aed' },
-  { code: 'ig', name: 'Igbo', native: 'Igbo', greeting: 'Ndewo! Kedu otu m ga-esi nyere gi aka taa?', color: '#dc2626' },
-  { code: 'pcm', name: 'Pidgin', native: 'Naija Pidgin', greeting: 'How far! Wetin dey do you today?', color: '#d97706' },
-];
 
 const RISK: Record<string, { color: string; bg: string }> = {
   high: { color: '#dc2626', bg: '#fef2f2' },
@@ -33,7 +28,8 @@ const RISK: Record<string, { color: string; bg: string }> = {
 export default function TriagePage() {
   const router = useRouter();
   const [phase, setPhase] = useState<Phase>('language');
-  const [lang, setLang] = useState<Lang>('en');
+  const [lang, setLang] = useState<Language>('en');
+  const [isSpeaking, setIsSpeaking] = useState(false);
   const [msgs, setMsgs] = useState<Msg[]>([]);
   const [input, setInput] = useState('');
   const [staffNote, setStaffNote] = useState('');
@@ -58,37 +54,55 @@ export default function TriagePage() {
 
   useEffect(() => { chatEnd.current?.scrollIntoView({ behavior: 'smooth' }); }, [msgs]);
 
-  function selectLang(code: Lang) {
+  async function selectLang(code: Language) {
+    stopCurrentAudio();
     setLang(code);
-    const l = LANGS.find(x => x.code === code)!;
-    setMsgs([{ role: 'ai', content: l.greeting }]);
+    const l = getLanguage(code);
+    let transcriptEnglish: string | undefined;
+    if (code !== 'en') {
+      try {
+        const tr = await triageTranslate(l.greeting, code);
+        if (tr.transcript_english) transcriptEnglish = tr.transcript_english;
+      } catch {}
+    }
+    setMsgs([{ role: 'ai', content: l.greeting, transcriptEnglish }]);
     setPhase('conversation');
-    playTTS(l.greeting, code);
+    speakText(l.greeting, code, () => setIsSpeaking(true), () => setIsSpeaking(false));
   }
 
-  async function playTTS(text: string, l: string) {
-    try {
-      const blob = await triageTTS(text, l);
-      const audio = new Audio(URL.createObjectURL(blob));
-      audio.play().catch(() => {});
-    } catch {}
+  useEffect(() => {
+    return () => stopCurrentAudio();
+  }, []);
+
+  function playTTS(text: string, l: Language) {
+    speakText(text, l, () => setIsSpeaking(true), () => setIsSpeaking(false));
   }
 
-  function buildHistory() {
-    return msgs.filter(m => m.role !== 'staff').map(m => m.role === 'patient' ? `PATIENT: ${m.content}` : `YOU: ${m.content}`).join('\n');
+  function buildHistory(messages?: Msg[]) {
+    const m = messages ?? msgs;
+    return m.filter(x => x.role !== 'staff').map(x => x.role === 'patient' ? `PATIENT: ${x.content}` : `YOU: ${x.content}`).join('\n');
   }
 
   async function send(text: string) {
     if (!text.trim()) return;
-    const newMsgs: Msg[] = [...msgs, { role: 'patient', content: text }];
-    setMsgs(newMsgs);
     setInput('');
     setLoading(true);
     setError('');
+    let transcriptEnglish: string | undefined;
+    if (lang !== 'en') {
+      try {
+        const tr = await triageTranslate(text, lang);
+        if (tr.transcript_english) transcriptEnglish = tr.transcript_english;
+      } catch {}
+    }
+    const patientMsg: Msg = { role: 'patient', content: text, transcriptEnglish };
+    const newMsgs: Msg[] = [...msgs, patientMsg];
+    setMsgs(newMsgs);
     try {
-      const res = await triageContinue({ conversation_history: buildHistory(), patient_message: text, staff_notes: staffNotes, language: lang });
-      const aiMsg: Msg = { role: 'ai', content: res.response };
-      setMsgs([...newMsgs, aiMsg]);
+      const res = await triageContinue({ conversation_history: buildHistory(newMsgs), patient_message: text, staff_notes: staffNotes, language: lang });
+      const aiTranscriptEnglish = res.response_english || undefined;
+      const aiMsg: Msg = { role: 'ai', content: res.response, transcriptEnglish: aiTranscriptEnglish };
+      setMsgs(prev => [...prev, aiMsg]);
       playTTS(res.response, lang);
       if (res.should_auto_complete) setTimeout(() => completeAssessment([...newMsgs, aiMsg]), 1500);
     } catch (err) { setError(getError(err)); }
@@ -139,10 +153,31 @@ export default function TriagePage() {
       mrRef.current!.stream.getTracks().forEach(t => t.stop());
     });
     try {
-      const res = await triageProcessAudio(blob, lang, staffNotes);
-      if (res.transcript) setMsgs(prev => [...prev, { role: 'patient', content: String(res.transcript) }]);
-      setTriageResult(res);
-      setPhase('results');
+      const res = await triageTranscribe(blob, lang);
+      const transcript = res.transcript || '';
+      if (!transcript) {
+        setError('No speech detected. Please try again.');
+        return;
+      }
+      const patientMsg: Msg = {
+        role: 'patient',
+        content: transcript,
+        transcriptEnglish: res.transcript_english || undefined,
+      };
+      setMsgs(prev => [...prev, patientMsg]);
+      // Continue conversation (like aidcare-lang) — don't go to results
+      const newMsgs = [...msgs, patientMsg];
+      const res2 = await triageContinue({
+        conversation_history: buildHistory(newMsgs),
+        patient_message: transcript,
+        staff_notes: staffNotes,
+        language: lang,
+      });
+      const aiTranscriptEnglish = res2.response_english || undefined;
+      const aiMsg: Msg = { role: 'ai', content: res2.response, transcriptEnglish: aiTranscriptEnglish };
+      setMsgs(prev => [...prev, aiMsg]);
+      playTTS(res2.response, lang);
+      if (res2.should_auto_complete) setTimeout(() => completeAssessment([...newMsgs, aiMsg]), 1500);
     } catch (err) { setError(getError(err)); }
     finally { setRecState('idle'); }
   }
@@ -204,10 +239,10 @@ export default function TriagePage() {
             <h1 className="text-2xl font-bold text-slate-900 mb-2">Patient Triage</h1>
             <p className="text-sm text-slate-500 mb-8">Select the patient&apos;s preferred language to begin.</p>
             <div className="grid grid-cols-2 sm:grid-cols-5 gap-3">
-              {LANGS.map(l => (
+              {Object.values(LANGUAGES).map(l => (
                 <button key={l.code} onClick={() => selectLang(l.code)}
                   className="bg-white rounded-xl border border-slate-200 p-5 text-center hover:shadow-md hover:border-slate-300 transition-all group">
-                  <p className="text-lg font-bold mb-1" style={{ color: l.color }}>{l.native}</p>
+                  <p className="text-lg font-bold mb-1" style={{ color: l.accentColor }}>{l.nativeScript}</p>
                   <p className="text-xs text-slate-500">{l.name}</p>
                 </button>
               ))}
@@ -223,9 +258,12 @@ export default function TriagePage() {
                 <div className="flex items-center gap-3">
                   <h2 className="text-base font-semibold text-slate-900">Triage Conversation</h2>
                   <span className="text-[10px] font-medium px-2 py-0.5 rounded-full border"
-                    style={{ color: LANGS.find(x => x.code === lang)?.color, borderColor: `${LANGS.find(x => x.code === lang)?.color}30`, background: `${LANGS.find(x => x.code === lang)?.color}08` }}>
-                    {LANGS.find(x => x.code === lang)?.name}
+                    style={{ color: LANGUAGES[lang]?.accentColor, borderColor: `${LANGUAGES[lang]?.accentColor}30`, background: `${LANGUAGES[lang]?.accentColor}08` }}>
+                    {LANGUAGES[lang]?.name}
                   </span>
+                  {isSpeaking && (
+                    <span className="text-xs text-slate-500 animate-pulse">{LANGUAGES[lang]?.speakingLabel}</span>
+                  )}
                 </div>
                 <button onClick={() => completeAssessment()} disabled={msgs.length < 3 || loading}
                   className="h-9 px-4 rounded-lg bg-primary text-white text-sm font-medium hover:bg-primary-hover transition disabled:opacity-40 shadow-sm shadow-blue-200">
@@ -249,6 +287,11 @@ export default function TriagePage() {
                       }`}>
                         {m.role === 'staff' && <p className="text-[10px] font-semibold text-amber-600 uppercase mb-1">Staff Note</p>}
                         {m.content}
+                        {m.transcriptEnglish && (m.role === 'patient' || m.role === 'ai') && (
+                          <div className={`mt-2 pt-2 text-xs ${m.role === 'patient' ? 'border-t border-white/30 opacity-95' : 'border-t border-slate-200 bg-slate-50 px-2 py-1.5 rounded-lg text-slate-600'}`}>
+                            <span className="font-medium">English:</span> {m.transcriptEnglish}
+                          </div>
+                        )}
                       </div>
                     </div>
                   ))}
@@ -275,7 +318,7 @@ export default function TriagePage() {
                   <>
                     <input value={input} onChange={e => setInput(e.target.value)}
                       onKeyDown={e => e.key === 'Enter' && !loading && send(input)}
-                      placeholder="Type patient's words..."
+                      placeholder={LANGUAGES[lang]?.placeholder || "Type patient's words..."}
                       className="flex-1 h-10 rounded-lg border border-slate-200 bg-slate-50 px-3 text-sm focus:ring-2 focus:ring-primary focus:border-transparent" disabled={loading} />
                     <button onClick={startRec} className="size-10 rounded-lg bg-red-500 hover:bg-red-600 flex items-center justify-center text-white transition shadow-sm">
                       <Icon name="mic" className="text-lg" />
@@ -289,7 +332,7 @@ export default function TriagePage() {
                   <div className="flex items-center gap-3 flex-1">
                     <span className="flex items-center gap-1.5 text-sm text-red-600">
                       <span className="size-2 rounded-full bg-red-500 animate-pulse" />
-                      Recording {fmt(recTime)}
+                      {LANGUAGES[lang]?.listeningLabel || 'Recording'} {fmt(recTime)}
                     </span>
                     <button onClick={stopRec} className="ml-auto h-10 px-4 rounded-lg bg-primary text-white text-sm font-medium hover:bg-primary-hover transition">
                       Stop &amp; Process
@@ -298,7 +341,7 @@ export default function TriagePage() {
                 ) : (
                   <div className="flex items-center gap-2 text-sm text-slate-500 flex-1">
                     <div className="size-4 border-2 border-primary border-t-transparent rounded-full animate-spin" />
-                    Processing audio...
+                    {LANGUAGES[lang]?.thinkingLabel || 'Processing audio...'}
                   </div>
                 )}
               </div>
@@ -354,6 +397,11 @@ export default function TriagePage() {
             <div className="bg-white rounded-xl border border-slate-200 p-5 mb-4">
               <h3 className="text-sm font-semibold text-slate-900 mb-2">Summary</h3>
               <p className="text-sm text-slate-700">{(rec?.summary_of_findings as string) || 'No summary.'}</p>
+              {rec?.summary_english && (
+                <p className="mt-2 pt-2 border-t border-slate-200 text-xs text-slate-600 bg-slate-50 px-3 py-2 rounded-lg">
+                  <span className="font-medium">English:</span> {rec.summary_english as string}
+                </p>
+              )}
             </div>
 
             <div className="grid grid-cols-2 gap-4 mb-4">
@@ -369,7 +417,15 @@ export default function TriagePage() {
                 <h3 className="text-sm font-semibold text-slate-900 mb-3">Recommended Actions</h3>
                 <ul className="space-y-1.5 text-sm text-slate-700">
                   {((rec?.recommended_actions_for_chw as string[]) || []).map((a, i) => (
-                    <li key={i} className="flex gap-2"><span className="text-primary font-bold">{i + 1}.</span>{a}</li>
+                    <li key={i} className="flex gap-2">
+                      <span className="text-primary font-bold">{i + 1}.</span>
+                      <span>{a}</span>
+                      {(rec?.recommended_actions_english as string[])?.[i] && (
+                        <span className="block mt-0.5 text-xs text-slate-600 pl-5">
+                          <span className="font-medium">English:</span> {(rec.recommended_actions_english as string[])[i]}
+                        </span>
+                      )}
+                    </li>
                   ))}
                 </ul>
               </div>

@@ -8,7 +8,7 @@ import os
 from .rate_limiter import cached_gemini_call, RateLimitExceeded
 
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
-OPENAI_MODEL_EXTRACTION = os.getenv("OPENAI_MODEL_EXTRACTION", "gpt-4o-mini")
+OPENAI_MODEL_EXTRACTION = os.getenv("OPENAI_MODEL_EXTRACTION", "gpt-4o")
 
 _SYSTEM_INSTRUCTION = (
     "You are an expert medical information extractor for a triage system. "

@@ -8,6 +8,7 @@ import time
 
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
 OPENAI_MODEL_MULTILINGUAL = os.getenv("OPENAI_MODEL_MULTILINGUAL", "gpt-4o")
+OPENAI_MODEL_TRANSLATE = os.getenv("OPENAI_MODEL_TRANSLATE", "gpt-4o")  # Translation: OpenAI for higher quality
 
 # ---------------------------------------------------------------------------
 # Language system instructions — forces GPT-4o to respond in target language
@@ -113,6 +114,36 @@ def _language_name(code: str) -> str:
         'pcm': 'Nigerian Pidgin'
     }
     return names.get(code, 'English')
+
+
+def translate_to_english(text: str, source_language: str) -> str | None:
+    """
+    Translate text from a Nigerian language to English for transparency.
+    Uses OpenAI (gpt-4o by default) for higher quality.
+    Returns None if source is English or translation fails.
+    """
+    if not text or not text.strip() or source_language == 'en':
+        return None
+    if not OPENAI_API_KEY:
+        return None
+
+    lang_name = _language_name(source_language)
+    try:
+        from openai import OpenAI
+        client = OpenAI(api_key=OPENAI_API_KEY)
+        response = client.chat.completions.create(
+            model=OPENAI_MODEL_TRANSLATE,
+            messages=[
+                {"role": "system", "content": f"Translate the following from {lang_name} to English. Output ONLY the English translation, nothing else. Preserve medical terms."},
+                {"role": "user", "content": text.strip()},
+            ],
+            max_tokens=1000,
+        )
+        out = (response.choices[0].message.content or "").strip()
+        return out if out else None
+    except Exception as e:
+        print(f"Translation to English failed: {e}")
+        return None
 
 
 def generate_multilingual_response(

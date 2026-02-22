@@ -11,6 +11,7 @@ const NAV_LINKS = [
   { href: '/triage', label: 'Triage' },
   { href: '/scribe', label: 'Scribe' },
   { href: '/patients', label: 'Patients' },
+  { href: '/burnout', label: 'Burnout' },
   { href: '/handover', label: 'Handover' },
 ];
 
@@ -28,7 +29,7 @@ export default function Header({ user }: { user: AuthUser | null }) {
           <div className="size-8 bg-primary/10 flex items-center justify-center rounded-lg">
             <Icon name="medical_services" className="text-primary text-xl" />
           </div>
-          <h2 className="text-slate-900 text-xl font-bold leading-tight tracking-tight">AidCare</h2>
+          <h2 className="text-slate-900 text-xl font-bold leading-tight tracking-tight">AidCare Copilot</h2>
         </Link>
 
         <label className="hidden md:flex flex-col min-w-40 max-w-64">

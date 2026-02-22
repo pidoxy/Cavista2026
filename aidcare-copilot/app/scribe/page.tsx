@@ -3,7 +3,7 @@
 import { Suspense, useEffect, useRef, useState } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import Icon from '../../components/Icon';
-import { transcribeAndScribe, getPatientDetail, getPatients, startShift, getActiveShift, getError } from '../../lib/api';
+import { transcribeAndScribe, regenerateScribeSoap, getPatientDetail, getPatients, startShift, getActiveShift, getError } from '../../lib/api';
 import { getSessionUser, getSessionShift, setSessionShift } from '../../lib/session';
 import { ScribeResult, PatientDetail, SOAPNote, Language, Patient } from '../../types';
 
@@ -15,7 +15,7 @@ interface TranscriptMsg {
   tags?: string[];
 }
 
-type RecState = 'idle' | 'recording' | 'processing';
+type RecState = 'idle' | 'recording' | 'paused' | 'processing';
 
 function ScribeContent() {
   const router = useRouter();
@@ -33,6 +33,7 @@ function ScribeContent() {
   const [language, setLanguage] = useState<Language>('en');
   const [result, setResult] = useState<ScribeResult | null>(null);
   const [error, setError] = useState('');
+  const [regenerating, setRegenerating] = useState(false);
 
   const mrRef = useRef<MediaRecorder | null>(null);
   const chunksRef = useRef<Blob[]>([]);
@@ -91,6 +92,28 @@ function ScribeContent() {
     } catch { setError('Microphone access denied.'); }
   }
 
+  function pauseRec() {
+    const mr = mrRef.current;
+    if (!mr || mr.state !== 'recording') return;
+    if (typeof mr.pause === 'function') {
+      mr.pause();
+      if (timerRef.current) clearInterval(timerRef.current);
+      setRecState('paused');
+    } else {
+      setError('Pause not supported in this browser.');
+    }
+  }
+
+  function resumeRec() {
+    const mr = mrRef.current;
+    if (!mr || mr.state !== 'paused') return;
+    if (typeof mr.resume === 'function') {
+      mr.resume();
+      setRecState('recording');
+      timerRef.current = setInterval(() => setRecTime(t => t + 1), 1000);
+    }
+  }
+
   async function stopAndProcess() {
     setRecState('processing'); setError('');
     if (timerRef.current) clearInterval(timerRef.current);
@@ -111,6 +134,24 @@ function ScribeContent() {
     finally { setRecState('idle'); }
   }
 
+  async function handleRegenerate() {
+    const transcriptText = result?.transcript;
+    if (!transcriptText?.trim()) { setError('No transcript to regenerate from.'); return; }
+    setRegenerating(true); setError('');
+    try {
+      const res = await regenerateScribeSoap(transcriptText, language);
+      setSoap(res.soap_note);
+      setResult(prev => prev ? { ...prev, soap_note: res.soap_note, soap_error: res.soap_error } : null);
+      if (res.soap_error) setError(`SOAP generation: ${res.soap_error}`);
+    } catch (err) { setError(getError(err)); }
+    finally { setRegenerating(false); }
+  }
+
+  function handleReviewAndSign() {
+    if (!result || !patientId) return;
+    router.push(`/patients?patient=${patientId}`);
+  }
+
   const fmt = (s: number) => `${String(Math.floor(s / 60)).padStart(2, '0')}:${String(s % 60).padStart(2, '0')}`;
 
   return (
@@ -126,7 +167,7 @@ function ScribeContent() {
               <Icon name="medical_services" className="text-blue-600 text-lg" />
             </div>
             <div>
-              <p className="text-sm font-bold text-slate-900">AidCare Scribe</p>
+              <p className="text-sm font-bold text-slate-900">AidCare Copilot Scribe</p>
               {patientId && <p className="text-[10px] text-slate-400">Session ID: #AC-{patientId.slice(-4).toUpperCase()}-LAG</p>}
             </div>
           </div>
@@ -136,6 +177,12 @@ function ScribeContent() {
             <span className="flex items-center gap-1.5 text-xs font-semibold bg-red-50 text-red-600 px-3 py-1.5 rounded-full border border-red-100">
               <span className="size-2 rounded-full bg-red-500 animate-pulse" />
               RECORDING LIVE&nbsp;&nbsp;{fmt(recTime)}
+            </span>
+          )}
+          {recState === 'paused' && (
+            <span className="flex items-center gap-1.5 text-xs font-semibold bg-amber-50 text-amber-700 px-3 py-1.5 rounded-full border border-amber-200">
+              <span className="size-2 rounded-full bg-amber-500" />
+              PAUSED&nbsp;&nbsp;{fmt(recTime)}
             </span>
           )}
           <select value={language} onChange={e => setLanguage(e.target.value as Language)}
@@ -324,10 +371,23 @@ function ScribeContent() {
             )}
             {recState === 'recording' && (
               <>
-                <button className="size-10 rounded-full border border-slate-200 bg-slate-50 flex items-center justify-center text-slate-500 hover:bg-slate-100 transition">
+                <button onClick={pauseRec} className="size-10 rounded-full border border-slate-200 bg-slate-50 flex items-center justify-center text-slate-500 hover:bg-slate-100 transition">
                   <Icon name="pause" className="text-lg" />
                 </button>
                 <button onClick={stopAndProcess} className="size-14 rounded-full bg-red-500 hover:bg-red-600 transition flex items-center justify-center shadow-lg shadow-red-200 animate-pulse">
+                  <Icon name="stop" className="text-white text-2xl" />
+                </button>
+                <button className="size-10 rounded-full border border-slate-200 bg-slate-50 flex items-center justify-center text-slate-400 hover:bg-slate-100 transition">
+                  <Icon name="format_list_bulleted" className="text-lg" />
+                </button>
+              </>
+            )}
+            {recState === 'paused' && (
+              <>
+                <button onClick={resumeRec} className="size-10 rounded-full border border-green-200 bg-green-50 flex items-center justify-center text-green-600 hover:bg-green-100 transition">
+                  <Icon name="play_arrow" className="text-lg" />
+                </button>
+                <button onClick={stopAndProcess} className="size-14 rounded-full bg-red-500 hover:bg-red-600 transition flex items-center justify-center shadow-lg shadow-red-200">
                   <Icon name="stop" className="text-white text-2xl" />
                 </button>
                 <button className="size-10 rounded-full border border-slate-200 bg-slate-50 flex items-center justify-center text-slate-400 hover:bg-slate-100 transition">
@@ -350,7 +410,12 @@ function ScribeContent() {
             <h2 className="text-xs font-bold text-slate-500 uppercase tracking-wider flex items-center gap-2">
               <Icon name="auto_awesome" className="text-lg text-amber-500" /> Auto-Generated SOAP
             </h2>
-            {result && <button className="text-blue-600 text-xs font-medium hover:underline">Regenerate</button>}
+            {result && (
+              <button onClick={handleRegenerate} disabled={regenerating || !result.transcript?.trim()}
+                className="text-blue-600 text-xs font-medium hover:underline disabled:opacity-50 disabled:cursor-not-allowed">
+                {regenerating ? 'Regenerating...' : 'Regenerate'}
+              </button>
+            )}
           </div>
 
           <div className="flex-1 overflow-y-auto p-5 space-y-5">
@@ -374,9 +439,14 @@ function ScribeContent() {
           </div>
 
           <div className="p-4 border-t border-slate-200">
-            <button disabled={!result}
+            {result?.soap_error && (
+              <p className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2 mb-3">
+                SOAP generation issue: {result.soap_error}. Try Regenerate.
+              </p>
+            )}
+            <button onClick={handleReviewAndSign} disabled={!result || !patientId}
               className={`w-full py-3 rounded-lg text-sm font-semibold flex items-center justify-center gap-2 transition ${
-                result
+                result && patientId
                   ? 'bg-red-500 hover:bg-red-600 text-white shadow-lg shadow-red-200'
                   : 'bg-slate-100 text-slate-400 cursor-not-allowed'
               }`}>

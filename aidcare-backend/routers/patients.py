@@ -1,10 +1,12 @@
 # routers/patients.py
+import json
 import os
+import time
 import uuid
 from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
 
 from aidcare_pipeline.database import get_db
 from aidcare_pipeline import copilot_models as models
@@ -157,6 +159,10 @@ def list_patients(
     if status_filter:
         query = query.filter(models.Patient.status == status_filter)
 
+    query = query.options(
+        joinedload(models.Patient.ward),
+        joinedload(models.Patient.attending_doctor),
+    )
     patients = query.order_by(
         models.Patient.status.asc(),  # critical first
         models.Patient.updated_at.desc(),
@@ -180,12 +186,21 @@ def get_patient(
     db: Session = Depends(get_db),
     current_user: models.Doctor = Depends(get_current_user),
 ):
-    patient = db.query(models.Patient).filter(models.Patient.patient_uuid == patient_uuid).first()
+    patient = (
+        db.query(models.Patient)
+        .options(
+            joinedload(models.Patient.ward),
+            joinedload(models.Patient.attending_doctor),
+        )
+        .filter(models.Patient.patient_uuid == patient_uuid)
+        .first()
+    )
     if not patient:
         raise HTTPException(status_code=404, detail="Patient not found")
 
     consultations = (
         db.query(models.Consultation)
+        .options(joinedload(models.Consultation.doctor))
         .filter(models.Consultation.patient_id == patient.id)
         .order_by(models.Consultation.created_at.desc())
         .limit(10)
@@ -194,6 +209,7 @@ def get_patient(
 
     action_items = (
         db.query(models.ActionItem)
+        .options(joinedload(models.ActionItem.created_by))
         .filter(models.ActionItem.patient_id == patient.id, models.ActionItem.completed == False)
         .order_by(models.ActionItem.priority.asc(), models.ActionItem.created_at.desc())
         .all()
@@ -215,6 +231,8 @@ def get_patient(
             {
                 "consultation_id": c.consultation_uuid,
                 "timestamp": _to_iso(c.created_at),
+                "transcript": c.transcript_text or "",
+                "pidgin_detected": c.pidgin_detected or False,
                 "soap_note": {
                     "subjective": c.soap_subjective or "",
                     "objective": c.soap_objective or "",
@@ -224,6 +242,7 @@ def get_patient(
                 "patient_summary": c.patient_summary or "",
                 "complexity_score": c.complexity_score or 1,
                 "flags": c.flags or [],
+                "medication_changes": c.medication_changes or [],
                 "doctor_name": c.doctor.full_name if c.doctor else None,
             }
             for c in consultations
@@ -300,6 +319,10 @@ def complete_action_item(
 
 
 # --- AI-Summarized Patient History ---
+# In-memory cache: (patient_uuid -> (result, expiry_ts)). TTL 5 min.
+_ai_summary_cache: dict[str, tuple[dict, float]] = {}
+_AI_SUMMARY_TTL = 300  # seconds
+
 
 @router.get("/{patient_uuid}/ai-summary")
 def get_patient_ai_summary(
@@ -307,6 +330,11 @@ def get_patient_ai_summary(
     db: Session = Depends(get_db),
     current_user: models.Doctor = Depends(get_current_user),
 ):
+    now = time.time()
+    cached = _ai_summary_cache.get(patient_uuid)
+    if cached and cached[1] > now:
+        return cached[0]
+
     patient = db.query(models.Patient).filter(models.Patient.patient_uuid == patient_uuid).first()
     if not patient:
         raise HTTPException(status_code=404, detail="Patient not found")
@@ -315,7 +343,7 @@ def get_patient_ai_summary(
         db.query(models.Consultation)
         .filter(models.Consultation.patient_id == patient.id)
         .order_by(models.Consultation.created_at.desc())
-        .limit(20)
+        .limit(5)
         .all()
     )
 
@@ -344,13 +372,13 @@ def get_patient_ai_summary(
     )
 
     try:
-        import google.generativeai as genai
-        GOOGLE_API_KEY = os.environ.get("GOOGLE_API_KEY")
-        if not GOOGLE_API_KEY:
-            raise ValueError("GOOGLE_API_KEY not set")
+        from openai import OpenAI
+        api_key = os.environ.get("OPENAI_API_KEY")
+        if not api_key:
+            raise ValueError("OPENAI_API_KEY not set")
 
-        genai.configure(api_key=GOOGLE_API_KEY)
-        model = genai.GenerativeModel("gemini-2.0-flash-exp")
+        client = OpenAI(api_key=api_key)
+        model = os.getenv("OPENAI_MODEL_AI_SUMMARY", "gpt-4o")
 
         prompt = (
             f"{patient_context}\n"
@@ -362,16 +390,15 @@ def get_patient_ai_summary(
             "Return ONLY valid JSON, no markdown."
         )
 
-        response = model.generate_content(
-            prompt,
-            generation_config=genai.types.GenerationConfig(temperature=0.3, max_output_tokens=800),
+        response = client.chat.completions.create(
+            model=model,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.3,
+            max_tokens=800,
+            response_format={"type": "json_object"},
         )
-
-        import json
-        text = response.text.strip()
-        if text.startswith("```"):
-            text = text.split("\n", 1)[1].rsplit("```", 1)[0].strip()
-        result = json.loads(text)
+        result = json.loads(response.choices[0].message.content.strip())
+        _ai_summary_cache[patient_uuid] = (result, now + _AI_SUMMARY_TTL)
         return result
 
     except Exception as e:

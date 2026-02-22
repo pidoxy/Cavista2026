@@ -7,15 +7,9 @@ import os
 
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
 
-# Language code map: BCP-47 hints accepted by OpenAI Whisper API
-# pcm (Nigerian Pidgin) has no dedicated Whisper model — fall back to English
-_WHISPER_LANGUAGE_MAP = {
-    'ha': 'ha',   # Hausa
-    'yo': 'yo',   # Yoruba
-    'ig': 'ig',   # Igbo
-    'en': 'en',   # English
-    'pcm': 'en',  # Nigerian Pidgin — Whisper uses English as closest match
-}
+# OpenAI Whisper API supports limited languages; ha/yo/ig return 400 "unsupported"
+# Only pass language for English; for others use auto-detect (omit language param)
+_WHISPER_SUPPORTED = {'en'}  # Only these are reliably supported by Whisper API
 
 
 def load_whisper_model():
@@ -49,10 +43,12 @@ def transcribe_audio_local(audio_file_path: str, language: str = None) -> str:
     if not os.path.exists(audio_file_path):
         raise FileNotFoundError(f"Audio file not found: {audio_file_path}")
 
-    # Resolve Whisper language code
+    # Only pass language for English — ha/yo/ig cause Whisper 400 "unsupported"
     whisper_language = None
-    if language:
-        whisper_language = _WHISPER_LANGUAGE_MAP.get(language, 'en')
+    if language and language in _WHISPER_SUPPORTED:
+        whisper_language = language
+    elif language == 'pcm':
+        whisper_language = 'en'  # Pidgin — English closest match
 
     print(f"Transcribing via OpenAI Whisper API: {audio_file_path} "
           f"(language hint: {whisper_language or 'auto-detect'})...")

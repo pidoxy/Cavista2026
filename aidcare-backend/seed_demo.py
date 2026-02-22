@@ -19,7 +19,15 @@ load_dotenv()
 
 from aidcare_pipeline.database import SessionLocal, engine
 from aidcare_pipeline import copilot_models as m
-from aidcare_pipeline.auth import hash_password
+
+# Use bcrypt directly to avoid passlib/bcrypt version conflicts
+def _hash_password(password: str) -> str:
+    try:
+        from aidcare_pipeline.auth import hash_password
+        return hash_password(password)
+    except Exception:
+        import bcrypt
+        return bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
 
 # ── Create tables if they don't exist ─────────────────────────────────────────
 m.create_copilot_tables()
@@ -44,7 +52,7 @@ def uid():
 
 now = datetime.now(timezone.utc)
 PASSWORD = "demo1234"
-pw_hash = hash_password(PASSWORD)  # hash once, reuse
+pw_hash = _hash_password(PASSWORD)  # hash once, reuse
 
 # =============================================================================
 # ORGANIZATION 1: Lagos State Ministry of Health (Government)
@@ -124,6 +132,13 @@ super_admin = m.Doctor(
     hospital_id=lasuth.id, ward_id=None, role="super_admin",
 )
 
+# -- Org Admin (Lagos State Ministry — sees LASUTH + GHI, all hospital admins & health workers) --
+org_admin = m.Doctor(
+    doctor_uuid=uid(), email="orgadmin@lagoshealth.ng", password_hash=pw_hash,
+    full_name="Dr. Obinna Adebayo", specialty="Health Administration",
+    hospital_id=lasuth.id, ward_id=None, role="org_admin",
+)
+
 # -- LASUTH Doctors --
 lasuth_admin = m.Doctor(
     doctor_uuid=uid(), email="admin@lasuth.ng", password_hash=pw_hash,
@@ -175,7 +190,7 @@ dr_mercy = m.Doctor(
     hospital_id=hpcc.id, ward_id=hpcc_children.id, role="doctor",
 )
 
-all_doctors = [super_admin, lasuth_admin, dr_chioma, dr_yusuf, dr_sarah, dr_kemi, ghi_admin, dr_funke, hp_admin, dr_mercy]
+all_doctors = [super_admin, org_admin, lasuth_admin, dr_chioma, dr_yusuf, dr_sarah, dr_kemi, ghi_admin, dr_funke, hp_admin, dr_mercy]
 db.add_all(all_doctors)
 db.flush()
 
@@ -553,11 +568,18 @@ print("Seeding burnout and fatigue data...")
 
 burnout_data = [
     # (doctor, shift, cls, status, patients_seen, hours, avg_complexity)
+    # LASUTH
     (dr_chioma, shift_chioma, 82, "red", 6, 8.0, 4.2),
     (dr_yusuf, shift_yusuf, 48, "amber", 2, 6.0, 3.0),
     (dr_mercy, shift_mercy, 35, "green", 2, 4.0, 3.0),
     (dr_sarah, None, 28, "green", 1, 3.0, 2.5),
     (dr_kemi, None, 65, "amber", 1, 10.0, 5.0),
+    (lasuth_admin, None, 55, "amber", 0, 8.0, 4.0),  # Hospital admin — oversight
+    # General Hospital Ikeja
+    (ghi_admin, None, 42, "green", 3, 6.0, 3.0),
+    (dr_funke, None, 38, "green", 2, 5.0, 2.5),
+    # HealthPlus Community Clinic
+    (hp_admin, None, 45, "amber", 4, 7.0, 3.5),
 ]
 
 for doc, shift, cls, status, pts, hrs, avg_c in burnout_data:
@@ -678,10 +700,13 @@ print("    2. HealthPlus Foundation (NGO)")
 print("       └─ HealthPlus Community Clinic (2 wards: Outpatient, Pediatric)")
 print()
 print("  ┌──────────────────────────────────────────────────────────────┐")
-print("  │  LOGIN CREDENTIALS (password for all: demo1234)              │")
+print("  │  LOGIN CREDENTIALS (password for all: demo1234)                │")
 print("  ├──────────────────────────────────────────────────────────────┤")
-print("  │  SUPER ADMIN:                                                │")
+print("  │  SUPER ADMIN (all orgs):                                     │")
 print("  │    superadmin@aidcare.ng    Dr. Ngozi Eze                    │")
+print("  │                                                              │")
+print("  │  ORG ADMIN (Lagos State Ministry — LASUTH + GHI):             │")
+print("  │    orgadmin@lagoshealth.ng  Dr. Obinna Adebayo               │")
 print("  │                                                              │")
 print("  │  LASUTH:                                                     │")
 print("  │    admin@lasuth.ng          Dr. Amara Okafor  (Hospital Admin)│")
