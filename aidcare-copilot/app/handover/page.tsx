@@ -1,15 +1,19 @@
 'use client';
 
 import { useState } from 'react';
+import { useRouter } from 'next/navigation';
 import AppShell from '../../components/AppShell';
 import Icon from '../../components/Icon';
-import { generateHandover, getError } from '../../lib/api';
-import { getSessionShift, getSessionUser } from '../../lib/session';
+import { generateHandover, endShift, getError } from '../../lib/api';
+import { getSessionShift, getSessionUser, clearSession } from '../../lib/session';
 import { HandoverReport } from '../../types';
 
 export default function HandoverPage() {
+  const router = useRouter();
   const [report, setReport] = useState<HandoverReport | null>(null);
   const [loading, setLoading] = useState(false);
+  const [ending, setEnding] = useState(false);
+  const [shiftEnded, setShiftEnded] = useState(false);
   const [error, setError] = useState('');
   const [notes, setNotes] = useState('');
 
@@ -25,6 +29,21 @@ export default function HandoverPage() {
       setReport(r);
     } catch (err) { setError(getError(err)); }
     finally { setLoading(false); }
+  }
+
+  async function handleEndShift() {
+    if (!shift) return;
+    setEnding(true);
+    setError('');
+    try {
+      await endShift(shift.shift_id);
+      // Clear shift from session so dashboard reflects ended state
+      if (typeof window !== 'undefined') {
+        localStorage.removeItem('aidcare_shift');
+      }
+      setShiftEnded(true);
+    } catch (err) { setError(getError(err)); }
+    finally { setEnding(false); }
   }
 
   return (
@@ -48,24 +67,47 @@ export default function HandoverPage() {
               </div>
             )}
             {error && <div className="text-sm text-red-600 bg-red-50 border border-red-100 rounded-lg px-3 py-2 mb-4">{error}</div>}
-            <button onClick={generate} disabled={loading || !shift}
-              className="h-10 px-6 rounded-lg bg-primary text-white text-sm font-medium hover:bg-primary-hover transition disabled:opacity-40 shadow-sm shadow-blue-200">
-              {loading ? 'Generating...' : 'Generate Report'}
-            </button>
+            <div className="flex flex-col gap-3">
+              <button onClick={generate} disabled={loading || !shift}
+                className="h-10 px-6 rounded-lg bg-primary text-white text-sm font-medium hover:bg-primary-hover transition disabled:opacity-40 shadow-sm shadow-blue-200">
+                {loading ? 'Generating...' : 'Generate Report'}
+              </button>
+              {shift && (
+                <button onClick={handleEndShift} disabled={ending || shiftEnded}
+                  className="h-10 px-6 rounded-lg border border-red-200 bg-white text-red-600 text-sm font-medium hover:bg-red-50 transition disabled:opacity-40 flex items-center justify-center gap-2">
+                  <Icon name="logout" className="text-lg" />
+                  {shiftEnded ? 'Shift Ended' : ending ? 'Ending Shift...' : 'End Shift'}
+                </button>
+              )}
+              {shiftEnded && (
+                <div className="bg-emerald-50 border border-emerald-100 rounded-lg px-4 py-3 text-sm text-emerald-700">
+                  Shift ended. Generate your handover report above before leaving.
+                </div>
+              )}
+            </div>
           </div>
         ) : (
           <>
             {/* Print bar */}
             <div className="bg-white border-b border-slate-200 px-6 py-3 flex items-center justify-between sticky top-0 z-10">
               <button onClick={() => setReport(null)} className="text-sm text-slate-500 hover:text-primary flex items-center gap-1">
-                <Icon name="arrow_back" className="text-lg" /> Back to Dashboard
+                <Icon name="arrow_back" className="text-lg" /> Back
               </button>
               <div className="flex items-center gap-3">
+                {shift && !shiftEnded && (
+                  <button onClick={handleEndShift} disabled={ending}
+                    className="h-9 px-4 rounded-lg border border-red-200 bg-white text-red-600 text-sm font-medium hover:bg-red-50 transition flex items-center gap-2 disabled:opacity-40">
+                    <Icon name="logout" className="text-lg" />
+                    {ending ? 'Ending...' : 'End Shift'}
+                  </button>
+                )}
+                {shiftEnded && (
+                  <span className="h-9 px-4 rounded-lg bg-emerald-50 border border-emerald-200 text-emerald-700 text-sm font-medium flex items-center gap-2">
+                    <Icon name="check_circle" className="text-lg" /> Shift Ended
+                  </span>
+                )}
                 <button onClick={() => window.print()} className="h-9 px-4 rounded-lg border border-slate-200 bg-white text-slate-700 text-sm font-medium hover:bg-slate-50 transition flex items-center gap-2">
                   <Icon name="print" className="text-lg" /> Print
-                </button>
-                <button className="h-9 px-4 rounded-lg bg-red-500 text-white text-sm font-medium hover:bg-red-600 transition flex items-center gap-2">
-                  <Icon name="download" className="text-lg" /> Export PDF
                 </button>
               </div>
             </div>
