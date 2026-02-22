@@ -365,18 +365,18 @@ export default function PatientsPage() {
                       </span>
                     </div>
                     <div className="grid md:grid-cols-2 gap-4">
-                      {rec?.urgency_level && (
+                      {rec?.urgency_level ? (
                         <div>
                           <p className="text-xs font-semibold text-slate-500 uppercase mb-1">Urgency</p>
-                          <p className="text-sm font-medium text-slate-800">{rec.urgency_level as string}</p>
+                          <p className="text-sm font-medium text-slate-800">{String(rec.urgency_level)}</p>
                         </div>
-                      )}
-                      {rec?.summary_of_findings && (
+                      ) : null}
+                      {rec?.summary_of_findings ? (
                         <div className="md:col-span-2">
                           <p className="text-xs font-semibold text-slate-500 uppercase mb-1">Summary</p>
-                          <p className="text-sm text-slate-700">{rec.summary_of_findings as string}</p>
+                          <p className="text-sm text-slate-700">{String(rec.summary_of_findings)}</p>
                         </div>
-                      )}
+                      ) : null}
                       {symptoms.length > 0 && (
                         <div className="md:col-span-2">
                           <p className="text-xs font-semibold text-slate-500 uppercase mb-2">Reported Symptoms</p>

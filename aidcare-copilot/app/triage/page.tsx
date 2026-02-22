@@ -397,11 +397,11 @@ export default function TriagePage() {
             <div className="bg-white rounded-xl border border-slate-200 p-5 mb-4">
               <h3 className="text-sm font-semibold text-slate-900 mb-2">Summary</h3>
               <p className="text-sm text-slate-700">{(rec?.summary_of_findings as string) || 'No summary.'}</p>
-              {rec?.summary_english && (
+              {rec?.summary_english ? (
                 <p className="mt-2 pt-2 border-t border-slate-200 text-xs text-slate-600 bg-slate-50 px-3 py-2 rounded-lg">
-                  <span className="font-medium">English:</span> {rec.summary_english as string}
+                  <span className="font-medium">English:</span> {String(rec.summary_english)}
                 </p>
-              )}
+              ) : null}
             </div>
 
             <div className="grid grid-cols-2 gap-4 mb-4">
@@ -420,11 +420,11 @@ export default function TriagePage() {
                     <li key={i} className="flex gap-2">
                       <span className="text-primary font-bold">{i + 1}.</span>
                       <span>{a}</span>
-                      {(rec?.recommended_actions_english as string[])?.[i] && (
+                      {(rec?.recommended_actions_english as string[])?.[i] ? (
                         <span className="block mt-0.5 text-xs text-slate-600 pl-5">
-                          <span className="font-medium">English:</span> {(rec.recommended_actions_english as string[])[i]}
+                          <span className="font-medium">English:</span> {(rec?.recommended_actions_english as string[])?.[i]}
                         </span>
-                      )}
+                      ) : null}
                     </li>
                   ))}
                 </ul>
