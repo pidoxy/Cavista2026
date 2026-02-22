@@ -3,9 +3,9 @@
 import { useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import Icon from '../../components/Icon';
-import { getPatients, getPatientDetail, getPatientAISummary, getError } from '../../lib/api';
+import { getPatients, getPatientDetail, getPatientAISummary, completeActionItem, getError } from '../../lib/api';
 import { getSessionUser } from '../../lib/session';
-import { Patient, PatientDetail, Consultation } from '../../types';
+import { Patient, PatientDetail, Consultation, ActionItem } from '../../types';
 
 interface AISummary {
   chronic_conditions: { condition: string; details: string }[];
@@ -33,7 +33,12 @@ export default function PatientsPage() {
       const d = await getPatients();
       setGroups(d.patients);
       const all = [...d.patients.critical, ...d.patients.stable, ...d.patients.discharged];
-      if (all.length > 0) selectPatient(all[0].patient_id);
+      // If coming from triage with ?patient=<uuid>, open that patient directly
+      const targetId = typeof window !== 'undefined'
+        ? new URLSearchParams(window.location.search).get('patient')
+        : null;
+      if (targetId) selectPatient(targetId);
+      else if (all.length > 0) selectPatient(all[0].patient_id);
     } catch {} finally { setLoading(false); }
   }
 
@@ -319,6 +324,102 @@ export default function PatientsPage() {
                   </div>
                 </div>
               </section>
+
+              {/* Triage Result */}
+              {detail.triage_result && (() => {
+                const tr = detail.triage_result as Record<string, unknown>;
+                const risk = (tr.risk_level as string) || 'low';
+                const rec = tr.triage_recommendation as Record<string, unknown> | undefined;
+                const symptoms = (tr.extracted_symptoms as string[]) || [];
+                const RISK_CFG: Record<string, { color: string; bg: string; border: string }> = {
+                  high: { color: '#dc2626', bg: '#fef2f2', border: '#fecaca' },
+                  moderate: { color: '#d97706', bg: '#fffbeb', border: '#fde68a' },
+                  low: { color: '#059669', bg: '#ecfdf5', border: '#a7f3d0' },
+                };
+                const cfg = RISK_CFG[risk] ?? RISK_CFG.low;
+                return (
+                  <section className="rounded-xl border p-5 shadow-sm" style={{ background: cfg.bg, borderColor: cfg.border }}>
+                    <div className="flex items-center gap-2 mb-3">
+                      <Icon name="stethoscope" className="text-xl" style={{ color: cfg.color }} />
+                      <h2 className="text-base font-bold text-slate-900">Triage Assessment</h2>
+                      <span className="ml-auto text-xs font-bold px-3 py-0.5 rounded-full text-white uppercase tracking-wide"
+                        style={{ background: cfg.color }}>
+                        {risk} risk
+                      </span>
+                    </div>
+                    <div className="grid md:grid-cols-2 gap-4">
+                      {rec?.urgency_level && (
+                        <div>
+                          <p className="text-xs font-semibold text-slate-500 uppercase mb-1">Urgency</p>
+                          <p className="text-sm font-medium text-slate-800">{rec.urgency_level as string}</p>
+                        </div>
+                      )}
+                      {rec?.summary_of_findings && (
+                        <div className="md:col-span-2">
+                          <p className="text-xs font-semibold text-slate-500 uppercase mb-1">Summary</p>
+                          <p className="text-sm text-slate-700">{rec.summary_of_findings as string}</p>
+                        </div>
+                      )}
+                      {symptoms.length > 0 && (
+                        <div className="md:col-span-2">
+                          <p className="text-xs font-semibold text-slate-500 uppercase mb-2">Reported Symptoms</p>
+                          <div className="flex flex-wrap gap-1.5">
+                            {symptoms.map((s, i) => (
+                              <span key={i} className="text-xs font-medium px-2.5 py-1 rounded-full bg-white border"
+                                style={{ color: cfg.color, borderColor: cfg.border }}>{s}</span>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  </section>
+                );
+              })()}
+
+              {/* Action Items */}
+              {detail.action_items && detail.action_items.length > 0 && (() => {
+                const priorityOrder = { high: 0, normal: 1, low: 2 };
+                const sorted = [...detail.action_items].sort((a, b) => priorityOrder[a.priority] - priorityOrder[b.priority]);
+                return (
+                  <section>
+                    <h2 className="text-base font-bold text-slate-900 mb-3 flex items-center gap-2">
+                      <Icon name="checklist" className="text-xl text-amber-500" />
+                      Pending Action Items
+                      <span className="ml-1 text-xs font-bold bg-amber-100 text-amber-700 px-2 py-0.5 rounded-full border border-amber-200">
+                        {detail.action_items.length}
+                      </span>
+                    </h2>
+                    <div className="space-y-2">
+                      {sorted.map((item: ActionItem) => (
+                        <div key={item.item_id}
+                          className={`flex items-start gap-3 bg-white rounded-lg border px-4 py-3 ${item.priority === 'high' ? 'border-red-200 bg-red-50/30' : 'border-slate-200'}`}>
+                          <button
+                            onClick={() => completeActionItem(item.item_id).then(() => selectPatient(detail.patient_id)).catch(() => {})}
+                            className="mt-0.5 size-5 rounded-full border-2 flex-shrink-0 flex items-center justify-center transition hover:bg-emerald-50"
+                            style={{ borderColor: item.priority === 'high' ? '#ef4444' : '#94a3b8' }}
+                          />
+                          <div className="flex-1 min-w-0">
+                            <p className="text-sm font-medium text-slate-800">{item.description}</p>
+                            <div className="flex items-center gap-3 mt-0.5">
+                              {item.priority === 'high' && (
+                                <span className="text-[10px] font-bold text-red-600 uppercase">High Priority</span>
+                              )}
+                              {item.due_time && (
+                                <span className="text-[10px] text-slate-400">
+                                  Due {new Date(item.due_time).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                                </span>
+                              )}
+                              {item.created_by && (
+                                <span className="text-[10px] text-slate-400">by {item.created_by}</span>
+                              )}
+                            </div>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </section>
+                );
+              })()}
 
               {/* SOAP History */}
               <section className="flex flex-col gap-6">

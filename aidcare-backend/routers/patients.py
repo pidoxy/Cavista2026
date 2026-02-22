@@ -25,6 +25,7 @@ class PatientCreate(BaseModel):
     allergies: list[str] | None = None
     active_medications: list[dict] | None = None
     medical_history: list[dict] | None = None
+    triage_result: dict | None = None
 
 
 class PatientUpdate(BaseModel):
@@ -111,7 +112,10 @@ def create_patient(
         allergies=payload.allergies,
         active_medications=payload.active_medications,
         medical_history=payload.medical_history,
+        triage_result=payload.triage_result,
     )
+    if payload.triage_result and payload.triage_result.get("risk_level") == "high":
+        patient.status = "critical"
     db.add(patient)
     db.commit()
     db.refresh(patient)

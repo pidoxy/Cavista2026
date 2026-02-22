@@ -184,3 +184,6 @@ export const getMyBurnout = () => api<Record<string, unknown>>('/doctor/burnout/
 // ── Admin ──
 export const getAdminDashboard = (wardUuid?: string) =>
   api<Record<string, unknown>>(`/admin/dashboard/${wardUuid ? `?ward_uuid=${wardUuid}` : ''}`);
+
+export const getAdminAllocation = () =>
+  api<Record<string, unknown>>('/admin/allocation');

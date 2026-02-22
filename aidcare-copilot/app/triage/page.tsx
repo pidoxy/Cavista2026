@@ -1,9 +1,10 @@
 'use client';
 
 import { useEffect, useRef, useState } from 'react';
+import { useRouter } from 'next/navigation';
 import AppShell from '../../components/AppShell';
 import Icon from '../../components/Icon';
-import { triageContinue, triageProcessText, triageProcessAudio, triageTTS, triageSave, getPatients, getError } from '../../lib/api';
+import { triageContinue, triageProcessText, triageProcessAudio, triageTTS, triageSave, getPatients, createPatient, getError } from '../../lib/api';
 import { Patient } from '../../types';
 
 type Phase = 'language' | 'conversation' | 'results';
@@ -30,6 +31,7 @@ const RISK: Record<string, { color: string; bg: string }> = {
 };
 
 export default function TriagePage() {
+  const router = useRouter();
   const [phase, setPhase] = useState<Phase>('language');
   const [lang, setLang] = useState<Lang>('en');
   const [msgs, setMsgs] = useState<Msg[]>([]);
@@ -41,6 +43,12 @@ export default function TriagePage() {
   const [error, setError] = useState('');
   const [patients, setPatients] = useState<Patient[]>([]);
   const [showPicker, setShowPicker] = useState(false);
+  const [showCreate, setShowCreate] = useState(false);
+  const [newName, setNewName] = useState('');
+  const [newAge, setNewAge] = useState('');
+  const [newGender, setNewGender] = useState('');
+  const [creating, setCreating] = useState(false);
+  const [created, setCreated] = useState(false);
   const [recState, setRecState] = useState<RecState>('idle');
   const [recTime, setRecTime] = useState(0);
   const mrRef = useRef<MediaRecorder | null>(null);
@@ -146,10 +154,38 @@ export default function TriagePage() {
 
   async function assignTo(uuid: string) {
     if (!triageResult) return;
-    try { await triageSave(uuid, triageResult); setShowPicker(false); } catch (err) { setError(getError(err)); }
+    try {
+      await triageSave(uuid, triageResult);
+      setShowPicker(false);
+      // Navigate to that patient's record so the doctor can see the updated triage result
+      router.push(`/patients?patient=${uuid}`);
+    } catch (err) { setError(getError(err)); }
   }
 
-  function reset() { setPhase('language'); setMsgs([]); setStaffNotes(''); setStaffNote(''); setTriageResult(null); setError(''); setInput(''); }
+  async function createAndAssign() {
+    if (!newName.trim() || !triageResult) return;
+    setCreating(true);
+    setError('');
+    try {
+      const rec = triageResult.triage_recommendation as Record<string, unknown> | undefined;
+      const newPatient = await createPatient({
+        full_name: newName.trim(),
+        age: newAge ? parseInt(newAge) : null,
+        gender: newGender || null,
+        triage_result: triageResult,
+        status: risk === 'high' ? 'critical' : 'stable',
+        primary_diagnosis: (rec?.summary_of_findings as string) || null,
+      });
+      setCreated(true);
+      // Brief success flash, then navigate directly to the new patient's record
+      setTimeout(() => {
+        router.push(`/patients?patient=${(newPatient as { patient_id: string }).patient_id}`);
+      }, 800);
+    } catch (err) { setError(getError(err)); }
+    finally { setCreating(false); }
+  }
+
+  function reset() { setPhase('language'); setMsgs([]); setStaffNotes(''); setStaffNote(''); setTriageResult(null); setError(''); setInput(''); setShowCreate(false); setNewName(''); setNewAge(''); setNewGender(''); setCreated(false); }
 
   const rec = triageResult?.triage_recommendation as Record<string, unknown> | undefined;
   const risk = (triageResult?.risk_level as string) || 'low';
@@ -346,16 +382,78 @@ export default function TriagePage() {
               </div>
             )}
 
-            <div className="flex gap-3 mt-6">
+            <div className="flex flex-wrap gap-3 mt-6">
               {risk === 'high' && (
                 <a href="tel:112" className="h-10 px-5 rounded-lg bg-red-500 text-white text-sm font-medium flex items-center gap-2 hover:bg-red-600 transition">
                   <Icon name="call" className="text-lg" /> Call Emergency (112)
                 </a>
               )}
-              <button onClick={openPicker} className="h-10 px-5 rounded-lg bg-primary text-white text-sm font-medium hover:bg-primary-hover transition shadow-sm shadow-blue-200">
-                Assign to Patient Record
+              <button onClick={() => setShowCreate(true)} className="h-10 px-5 rounded-lg bg-primary text-white text-sm font-medium hover:bg-primary-hover transition shadow-sm shadow-blue-200 flex items-center gap-1.5">
+                <Icon name="person_add" className="text-lg" /> Register New Patient
+              </button>
+              <button onClick={openPicker} className="h-10 px-5 rounded-lg border border-primary text-primary text-sm font-medium hover:bg-primary/5 transition">
+                Assign to Existing Patient
               </button>
             </div>
+
+            {showCreate && (
+              <div className="fixed inset-0 bg-black/20 flex items-center justify-center z-50" onClick={() => setShowCreate(false)}>
+                <div className="bg-white rounded-xl shadow-xl p-6 w-96 border border-slate-200" onClick={e => e.stopPropagation()}>
+                  <h3 className="text-base font-semibold text-slate-900 mb-1">Register New Patient</h3>
+                  <p className="text-xs text-slate-500 mb-4">Triage result will be attached to this record automatically.</p>
+                  <div className="space-y-3">
+                    <div>
+                      <label className="block text-xs font-medium text-slate-600 mb-1">Full Name *</label>
+                      <input value={newName} onChange={e => setNewName(e.target.value)}
+                        placeholder="Patient's full name"
+                        className="w-full h-9 rounded-lg border border-slate-200 bg-slate-50 px-3 text-sm focus:ring-2 focus:ring-primary focus:border-transparent" />
+                    </div>
+                    <div className="grid grid-cols-2 gap-3">
+                      <div>
+                        <label className="block text-xs font-medium text-slate-600 mb-1">Age</label>
+                        <input value={newAge} onChange={e => setNewAge(e.target.value)} type="number" placeholder="e.g. 34"
+                          className="w-full h-9 rounded-lg border border-slate-200 bg-slate-50 px-3 text-sm focus:ring-2 focus:ring-primary focus:border-transparent" />
+                      </div>
+                      <div>
+                        <label className="block text-xs font-medium text-slate-600 mb-1">Gender</label>
+                        <select value={newGender} onChange={e => setNewGender(e.target.value)}
+                          className="w-full h-9 rounded-lg border border-slate-200 bg-slate-50 px-3 text-sm focus:ring-2 focus:ring-primary focus:border-transparent">
+                          <option value="">—</option>
+                          <option value="male">Male</option>
+                          <option value="female">Female</option>
+                        </select>
+                      </div>
+                    </div>
+                    <div className="flex items-center gap-2 bg-slate-50 rounded-lg px-3 py-2 border border-slate-200">
+                      <span className="text-xs text-slate-500">Triage Risk:</span>
+                      <span className="text-xs font-bold px-2 py-0.5 rounded-full text-white uppercase"
+                        style={{ background: RISK[risk]?.color }}>{risk}</span>
+                    </div>
+                  </div>
+                  {error && <p className="text-xs text-red-600 mt-2">{error}</p>}
+                  {created ? (
+                    <div className="mt-4 flex items-center gap-2 bg-emerald-50 border border-emerald-200 rounded-lg px-4 py-3">
+                      <Icon name="check_circle" className="text-emerald-600 text-xl flex-shrink-0" />
+                      <div>
+                        <p className="text-sm font-semibold text-emerald-800">Patient registered!</p>
+                        <p className="text-xs text-emerald-600">Opening {newName.trim()}&apos;s record…</p>
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="flex gap-2 mt-4">
+                      <button onClick={() => setShowCreate(false)}
+                        className="flex-1 h-9 rounded-lg border border-slate-200 bg-white text-slate-700 text-sm font-medium hover:bg-slate-50 transition">
+                        Cancel
+                      </button>
+                      <button onClick={createAndAssign} disabled={!newName.trim() || creating}
+                        className="flex-1 h-9 rounded-lg bg-primary text-white text-sm font-medium hover:bg-primary-hover transition disabled:opacity-40">
+                        {creating ? 'Registering...' : 'Register & Open Record'}
+                      </button>
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
 
             {showPicker && (
               <div className="fixed inset-0 bg-black/20 flex items-center justify-center z-50" onClick={() => setShowPicker(false)}>

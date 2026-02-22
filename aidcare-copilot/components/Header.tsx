@@ -14,9 +14,12 @@ const NAV_LINKS = [
   { href: '/handover', label: 'Handover' },
 ];
 
+const ADMIN_ROLES = ['super_admin', 'org_admin', 'hospital_admin', 'admin'];
+
 export default function Header({ user }: { user: AuthUser | null }) {
   const pathname = usePathname();
   const router = useRouter();
+  const isAdmin = user ? ADMIN_ROLES.includes(user.role) : false;
 
   return (
     <header className="sticky top-0 z-50 flex items-center justify-between border-b border-slate-200 bg-white px-6 lg:px-10 py-3 shadow-sm">
@@ -57,6 +60,17 @@ export default function Header({ user }: { user: AuthUser | null }) {
               </Link>
             );
           })}
+          {isAdmin && (
+            <Link
+              href="/admin"
+              className={`text-sm font-medium leading-normal transition-colors flex items-center gap-1 ${
+                pathname.startsWith('/admin') ? 'text-primary' : 'text-slate-900 hover:text-primary'
+              }`}
+            >
+              <Icon name="admin_panel_settings" className="text-base" />
+              Admin
+            </Link>
+          )}
         </nav>
 
         <div className="flex items-center gap-4">
