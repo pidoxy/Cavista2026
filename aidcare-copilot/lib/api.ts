@@ -274,7 +274,7 @@ const getAdminAllocationRaw = (hospitalUuid?: string) =>
     hospitals_in_scope: string[];
     overburdened_units: { ward_id: string; ward_name: string; ward_type: string; hospital_name: string; fatigue_index: number; patient_count: number; doctor_count: number; pat_doc_ratio: string; capacity: number; utilization: number; status: string }[];
     stable_units: { ward_id: string; ward_name: string; ward_type: string; hospital_name: string; fatigue_index: number; patient_count: number; doctor_count: number; pat_doc_ratio: string; capacity: number; utilization: number; status: string }[];
-    recommendations: { id: string; source_ward: string; source_hospital: string; target_ward: string; target_hospital: string; source_fatigue: number; target_fatigue: number; projected_fatigue_after: number; fatigue_reduction: string; priority: string }[];
+    recommendations: { id: string; source_ward: string; source_hospital: string; source_fatigue: number; source_available_staff: number; target_ward: string; target_hospital: string; target_fatigue: number; projected_fatigue_after: number; fatigue_reduction: string; priority: string }[];
     overburdened_count: number;
     stable_count: number;
   }>(`/admin/allocation${hospitalUuid ? `?hospital_uuid=${hospitalUuid}` : ''}`);
